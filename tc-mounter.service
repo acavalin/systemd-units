@@ -1,0 +1,22 @@
+; Mounts TrueCrypt volumes as a specified user (with sudo), runs fsck
+; on them, and executes an optional per volume custom script.
+
+[Unit]
+Description = TrueCrypt volumes mounter
+ConditionFileIsExecutable = /opt/myapps/lnx/systemd-units/tc-mounter.rb
+DefaultDependencies = no
+Requires  = sysinit.target local-fs.target
+After     = sysinit.target local-fs.target
+Before    = basic.target shutdown.target
+Conflicts = shutdown.target
+
+[Service]
+Type      = oneshot
+ExecStart = /opt/myapps/lnx/systemd-units/tc-mounter.rb fsck+mount
+ExecStop  = /opt/myapps/lnx/systemd-units/tc-mounter.rb try-umount
+RemainAfterExit   = yes
+SuccessExitStatus = 1
+StandardOutput    = journal+console
+
+[Install]
+WantedBy  = basic.target

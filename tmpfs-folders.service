@@ -1,0 +1,19 @@
+; A big step towards read only root file system to save preciuos disk
+; read/writes. Mounts /var/log and user homes directories on tmpfs.
+; SETUP: create directory skeletons (see tmpfs-folders.sh)
+
+[Unit]
+Description = TMPfs directory mounter
+ConditionFileIsExecutable = /opt/myapps/lnx/systemd-units/tmpfs-folders.sh
+DefaultDependencies = no
+Requires  = sysinit.target local-fs.target
+After     = sysinit.target local-fs.target
+Before    = basic.target
+
+[Service]
+Type      = oneshot
+ExecStart = /opt/myapps/lnx/systemd-units/tmpfs-folders.sh
+SuccessExitStatus = 1
+
+[Install]
+WantedBy  = basic.target

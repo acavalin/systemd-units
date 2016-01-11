@@ -1,0 +1,15 @@
+; SysV-init /etc/rc.local semi-equivalent for SystemD.
+; It does not run as the last service but it can count on a good
+; system initialization.
+
+[Unit]
+Description = System custom setup commands
+ConditionFileIsExecutable = /opt/myapps/lnx/systemd-units/sys-setup.sh
+After     = network.target
+
+[Service]
+Type      = oneshot
+ExecStart = /opt/myapps/lnx/systemd-units/sys-setup.sh
+
+[Install]
+WantedBy  = multi-user.target
