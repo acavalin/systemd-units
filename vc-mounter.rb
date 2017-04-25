@@ -1,250 +1,236 @@
 #!/usr/bin/ruby
 
-# --- USAGE -------------------------------------------------------------------
-# vc-mounter.rb               # mount volumes+filesystems
-# vc-mounter.rb umount        # umount volumes+filesystems
-# vc-mounter.rb umount force  # force umount volumes+filesystems
-# vc-mounter.rb fsck+mount    # mount volumes, run fsck, mount filesystems
+require 'yaml'       # config parsing
+require 'open3'      # run command with STDIN/OUT access
+require 'ostruct'    # hash to object utility
+require 'shellwords' # escape strings for the shell
 
-if `whoami`.strip != 'root'
-  puts 'you are not root!'
-  exit 2
-end
+Signal.trap('INT'){} # trap ^C
+STDOUT.sync = true   # autoflush
 
-require 'open3'
-
-Signal.trap('INT'){}  # trap ^C
-
-STDOUT.sync = true # autoflush
-
-@vc       = "/opt/myapps/lnx/veracrypt/bin/veracrypt.gui -t"
-@dst_user = 'cloud' # user that runs veracrypt
-@pass     = ' ' * 100
-@pim      = ' ' * 100 # personal iteration number
-@to_mount = { # /dev/disk/by-id/KEY => /mnt/MOUNT_POINT
-  # TODO: place here your device KEYs and corresponding mount points
-}
-
-# updates the list of devices to mount
-def existing_mounts
-  @to_mount.reject{|id, mp|
-    !( File.exists?("/dev/disk/by-id/#{id}") && File.exists?("/mnt/#{mp}") )
-  }
-end # existing_mounts -------------------------------------------------------
-
-def mountable_mounts
-  @to_mount.reject{|id, mp|
-    file_esistenti = File.exists?("/dev/disk/by-id/#{id}") && File.exists?("/mnt/#{mp}")
-    info   = `#{@vc} --volume-properties /dev/disk/by-id/#{src}`
-    device = info.split("\n").grep(/Device/)[0].to_s.split(':')[1].to_s.strip
-    montato = info !~ /^Mount.*mnt/ && File.exists?(device)
-    #montato = `#{@vc} --volume-properties /dev/disk/by-id/#{id} 2> /dev/null`.strip[0]
-    !file_esistenti || montato
-  }
-end # mountable_mounts ---------------------------------------------------------
-
-# mounts a single volume:
-#   mount = true => also mounts the filesystem
-def mount_volume(src, dst, mount=true)
-  mount_opts = 'users,rw,suid,exec,async'
-
-  print '.'
-
-  # check if volume is already mounted
-  info   = `#{@vc} --volume-properties /dev/disk/by-id/#{src}`
-  device = info.split("\n").grep(/Device/)[0].to_s.split(':')[1].to_s.strip
-
-  if info !~ /^Mount.*mnt/ && File.exists?(device)
-    # volume is already mounted but not the filesystem
-    system "mount -o #{mount_opts} #{device} /mnt/#{dst}"
-  else
-    # volume is not mounted
-    cmd = "#{@vc} -v -k \"\" --protect-hidden=no --fs-options=#{mount_opts} "
-    cmd += '--filesystem=none ' unless mount
-    Open3.popen3("sudo -u #{@dst_user} #{cmd} /dev/disk/by-id/#{src} /mnt/#{dst}") do |si, so, se|
-      si.puts @pass.to_s
-      si.puts @pim .to_s
-    end
-  end
-
-  print "\bM"
+class VCMounter
+  def initialize(cfg_file = 'vc-mounter.yml')
+    @cfg  = OpenStruct.new YAML.load_file(cfg_file)
+    @cfg.mount_opts ||= 'users,rw,suid,exec,async'
+    
+    @pass = ' ' * 100
+    @pim  = ' ' * 100 # personal iteration number
+  end # initialize -------------------------------------------------------------
   
-  # disable sleep timeout
-  if src.match(/^usb/)
-    ris = system("hdparm -q -S 0 #{src.sub /-part.$/, ''} 2> /dev/null")
-    print ris ? 'S' : 's'
-  end
-  
-  sleep 3
-  
-  if File.exists?("/mnt/#{dst}/setup_tchd")
-    `/usr/bin/ruby /mnt/#{dst}/setup_tchd`
-    print $?.to_i == 0 ? 'X' : 'x'
-  end
+  def run(args)
+    exit code: 2, msg: 'you are not root!' if `whoami`.strip != 'root'
+    
+    case args[0].to_s
+      when 'fsck+mount' # system mount
+        exit 0 if mount_all(mount: false, keep_pass: true) == :quit
 
-  print ' '
-end # mount_volume ------------------------------------------------------------
-
-# mount all volumes:
-#   mount = true => also mounts the filesystem
-# returns false if password = "quit", true otherwise
-def mount_volumes(options = {})
-  opts = {
-    :mount   => true,
-    :askpwd  => true,
-    :wipepwd => true
-  }.merge(options)
-
-  # mount volumes
-  #`stty -echo`  # disable TTY echo
-
-  # mount and print result
-  mounts = ''
-  to_mount = mountable_mounts
-  while !to_mount.keys.all?{|i| mounts.match i.to_s} do
-    if opts[:askpwd]
-      @pass = `systemd-ask-password "VeraCrypt volume password: "`.strip
-      break if @pass.to_s.strip == 'quit'
+        if (errors = fsck).empty?
+          mount_all map: false
+          exit 0
+        else
+          puts "Errors checking volumes filesystems:"
+          puts errors.map{|i| "  * #{i}" }
+          puts "Leaving volumes MAPPED for inspection"
+          `systemd-ask-password "Press ENTER to continue..."`
+          exit 2
+        end
       
-      @pim  = `systemd-ask-password "VeraCrypt volume PIM: "`.strip
-      break if @pim.to_s.strip == 'quit'
-    else
-      print "\tMounting VeraCrypt volumes: "
+      when 'try-umount' # system umount
+        print 'Unmounting all encrypted volumes... '
+        exit (dismount_volumes(force: false) || dismount_volumes(force: true)) ?
+          {code: 0, msg: 'done.' } : {code: 2, msg: "ERROR!\n#{managed_volumes_list}"}
+      
+      when 'mount'      # manual mount
+        mount_all
+        exit 1
+      
+      when 'umount'     # manual umount
+        print 'Unmounting all encrypted volumes... '
+        exit dismount_volumes(force: args.include?('force')) ?
+          {code: 1, msg: 'done.' } : {code: 2, msg: "ERROR!\n#{managed_volumes_list}"}
+      
+      else
+        exit code: 1, msg: "USAGE: #{File.basename __FILE__} <mount|fsck+mount|umount|try-umount> [force]"
     end
-    to_mount.each{|dev,dir| mount_volume dev.to_s, dir, opts[:mount]}
-    
-    sleep 1
-    mounts = `#{@vc} -l 2>&1 | sed 's/.*/\\t  * \\0/'`.gsub(/\/dev\/disk\/by-id\//,'')#.split("\n").map{|l| "\t  * #{l}"}.join "\n"
-    puts " done! (#{opts[:mount] ? 'volumes+fs' : 'volumes only' })"
-    puts "#{mounts}"
-    
-    to_mount = mountable_mounts
-  end
-
-  #`stty echo`  # enable TTY echo
+  end # run --------------------------------------------------------------------
   
-  has_quit = @pass.strip == 'quit'
+  # returns :quit if user typed "quit"
+  def mount_all(opts = {})
+    opts = {map: true, mount: true, keep_pass: false}.merge(opts)
 
-  # clean password
-  if opts[:wipepwd]
-    @pass.size.times{|i| @pass[i] = (100 * rand).to_i.chr}
-    @pim .size.times{|i| @pim[i]  = (100 * rand).to_i.chr}
-    @pass = @pim = nil
+    loop do
+      if @pass.strip.empty? # ask password+pim
+        @pass = `systemd-ask-password "Enter encrypted volumes password:"`.strip
+        @pim  = `systemd-ask-password "Enter encrypted volumes PIM:"     `.strip unless @pass == 'quit'
+        if [@pass, @pim].include?('quit')
+          puts "NOT mounting as requested."
+          break
+        end
+      end
+      
+      print "Mounting encrypted volumes (#{opts[:mount] ? 'map+mount' : 'map only' }): "
+      mountable_volumes.each{|id, mp| mount_volume id, mp, opts }
+      puts " done!"
+      
+      mounts = managed_volumes_list
+      puts mounts
+      
+      break if mountable_volumes.keys.all?{|id| mounts.match id.to_s }
+      
+      clear_pass unless opts[:keep_pass]
+    end
+    
+    @pass == 'quit' ? :quit : :ok
+  end # mount_all --------------------------------------------------------------
+  
+  def mount_volume(id, mp, opts = {})
+    opts = {map: true, mount: true}.merge(opts)
+    
+    print '_'
+    
+    status = volume_status id, mp
+    
+    if opts[:map] && !status.mapped && !status.mounted
+      Open3.popen3(
+        "sudo -u #{@cfg.user}" +
+        "  #{@cfg.app} -v -k \"\" --protect-hidden=no --filesystem=none" +
+        "  /dev/disk/by-id/#{id} #{mp.shellescape}"
+      ) do |si, so, se|
+        si.puts @pass.to_s
+        si.puts @pim .to_s
+      end
+      
+      status = volume_status id, mp
+      print "\b#{status.mapped ? 'm' : '-'}"
+    end
+  
+    if opts[:mount] && status.mapped && !status.mounted
+      system "sudo mount -o #{@cfg.mount_opts} #{status.map_dev} #{mp}"
+      status = volume_status id, mp
+      print "\b#{status.mounted ? 'M' : '-'}"
+    end
+    
+    # disable sleep timeout for usb drives
+    if id.match(/^usb/)
+      ris = system("hdparm -q -S 0 #{id.sub /-part.$/, ''} 2> /dev/null")
+      print ris ? 'S' : 's'
+    end
+    
+    print "_\b"
+    sleep 3
+    
+    if File.exists?("#{mp}/setup_tchd")
+      `/usr/bin/ruby #{mp}/setup_tchd`
+      print $?.to_i == 0 ? 'X' : 'x'
+    end
+  
+    print ' '
+  end # mount_volume -----------------------------------------------------------
+  
+  def fsck
+    errors   = []
+    to_check = {}
+  
+    puts "Checking all encrypted volumes..."
+    puts '-' * 79
+    
+    existing_volumes.each do |id, mp|
+      status = volume_status id, mp
+      name   = "#{mp} / #{id} @ #{status.map_dev}"
+      
+      if status.mapped && !status.mounted
+        puts "  * #{name}: to be checked"
+        to_check[id] = name
+      else
+        puts "  * #{name}: unmapped/missing! SKIPPING CHECK!"
+        errors << "#{name}: skipped"
+      end
+    end
+    
+    # parallel filesytem check
+    unless system "fsck -M -a -C0 #{to_check.keys.join ' '}"
+      errors << "#{to_check.values.join ', '}: fsck errors"
+    end
+    
+    puts '-' * 79
+    
+    errors
+  end # fsck -------------------------------------------------------------------
+  
+  def dismount_volumes(opts = {})
+    opts = {force: false}.merge(opts)
+  
+    sleep 0.5
+    
+    if opts[:force]
+      puts "Killing open processes..."
+      mounted_volumes.each{|v| system %Q|fuser -vmk #{v.mnt_dir.shellescape}| }
+      `#{@cfg.app} --force -d`
+    else
+      `#{@cfg.app} -d`
+    end
+    
+    sleep 0.5
+    
+    mounted_volumes.empty?
+  end # dismount_volumes -------------------------------------------------------
+  
+  def clear_pass
+    return if @pass.strip.empty? && @pim.strip.empty?
+    
+    puts "Clearing in-memory pass/pim..."
+    # clean password
+    @pass.size.times{|i| @pass[i] = rand(100).chr }
+    @pim .size.times{|i| @pim[i]  = rand(100).chr }
+    @pass = ' ' * 100
+    @pim  = ' ' * 100 # personal iteration number
     GC.enable
     GC.start
-  end
-
-  return !has_quit
-end # mount_volumes -----------------------------------------------------------
-
-# ritorna true se ci sono dischi ancora montati
-def dismount_volumes(options = {})
-  opts = {
-    :force  => false,
-    :rsync  => true,
-  }.merge(options)
-
-  # eventual backup
-  if opts[:rsync]
-    #`sync`
-  end
-
-  sleep 0.5
-  if opts[:force]
-    puts "\tKilling open processes..."
-    puts `fuser -vm "/mnt/#{d}"`
-    #existing_mounts.values.each{|d| system "fuser -vm \"/mnt/#{d}\""}
-    #print "\tKill'em all [y/N]? "
-    #if STDIN.gets.strip[0..0] == 'y'
-      existing_mounts.values.each{|d| system "fuser -vmk \"/mnt/#{d}\""}
-      `#{@vc} --force -d`
-    #end
-  else
-    `#{@vc} -d`
-  end
-  sleep 1
-  `#{@vc} -l 2>&1`.split("\n").grep(/dev.disk/).size > 0
-end # dismount_volumes --------------------------------------------------------
-
-def fsck_volumes
-  errors = []
-
-  puts "\tChecking all VeraCrypt volumes..."
-  puts '-' * 79
+  end # clear_pass -------------------------------------------------------------
   
-  devices = existing_mounts.map{|dev, mp|
-    info   = `#{@vc} --volume-properties /dev/disk/by-id/#{dev}`
-    device = info.split("\n").grep(/Device/)[0].to_s.split(':')[1].strip
-    name   = "#{mp} / #{dev} @ #{device}"
-    if info !~ /^Mount.*mnt/ && File.exists?(device)
-      # volume non montato
-      puts " * #{name}: to be checked"
-      [name, device]
-    else
-      # volume montato
-      puts " * #{name}: mounted/missing! SKIPPING CHECK!"
-      errors << "#{name}: skipped"
-      nil
-    end
-  }.compact
+  def volume_exists?(id, mp)
+    File.exists?("/dev/disk/by-id/#{id}") && File.exists?(mp)
+  end # volume_exists? ---------------------------------------------------------
   
-  unless system "fsck -M -a -C0 #{devices.map{|i| i[1]}.join ' '}"
-    errors << "#{devices.map{|i| i[0]}.join ', '}: fsck errors"
-  end
+  def volume_status(id, mp)
+    sleep 0.5
+    info     = `#{@cfg.app} --volume-properties /dev/disk/by-id/#{id} 2> /dev/null`.split("\n")
+    virt_dev = info.grep(/Device/)[0].to_s.split(':')[1].to_s.strip
+    mnt_dir  = info.grep(/Mount/ )[0].to_s.split(':')[1].to_s.strip
+    OpenStruct.new mapped:  File.exists?(virt_dev),
+                   mounted: File.exists?(mnt_dir),
+                   map_dev: virt_dev,
+                   mnt_dir: mnt_dir
+  end # volume_status ----------------------------------------------------------
   
-  puts '-' * 79
+  def existing_volumes
+    @cfg.mounts.select{|id, mp| volume_exists? id, mp }
+  end # existing_volumes -------------------------------------------------------
   
-  errors
-end # fsck_volumes ------------------------------------------------------------
-
-
-# --- main --------------------------------------------------------------------
-case ARGV[0].to_s
-  when 'try-umount'
-    # umount and eventually force umount
-    puts 'Unmounting all VeraCrypt volumes... '
-
-    ris = dismount_volumes(:force => false, :rsync => true)
-    ris = dismount_volumes(:force => true , :rsync => true) if ris
-
-    if ris
-      puts 'Unmounting all VeraCrypt volumes result: ERROR!'
-      exit 2
-    else
-      puts 'Unmounting all VeraCrypt volumes result: done!'
-      exit 0
-    end
-
-  when 'umount'
-    # umount volumes
-    puts 'Unmounting all VeraCrypt volumes... '
-    if dismount_volumes(:force => ARGV[1] == 'force', :rsync => true)
-      puts 'Unmounting all VeraCrypt volumes result: ERROR!'
-      exit 2
-    else
-      puts 'Unmounting all VeraCrypt volumes result: done!'
-      exit 0
-    end
+  def mountable_volumes
+    existing_volumes.reject{|id, mp| volume_status(id, mp).mounted }
+  end # mountable_volumes ------------------------------------------------------
   
-  when 'fsck+mount'
-    if mount_volumes :mount => false, :wipepwd => false
-      errors = fsck_volumes
-      if errors.size == 0
-        mount_volumes :askpwd => false
-        exit 0
-      else
-        puts "\tErrors checking VeraCrypt filesystems:"
-        puts errors.map{|i| "\t  * #{i}"}.join("\n")
-        `systemd-ask-password "Press ENTER to continue..."`
-        dismount_volumes :rsync => false
-        exit 2
-      end
-    else
-      puts "NOT mounting as requested."
-      exit 0
-    end
+  def mounted_volumes
+    existing_volumes.select{|id, mp| volume_status(id, mp).mounted }
+  end # mounted_volumes --------------------------------------------------------
   
-  else # mount
-    puts "NOT mounting as requested." unless mount_volumes
-    exit 1
+  def managed_volumes_list
+    `#{@cfg.app} -l 2>&1`.gsub(/.dev.disk.by-id./,'').gsub(/^/,'  * ')
+  end # managed_volumes_list ---------------------------------------------------
+  
+  
+  private # ____________________________________________________________________
+  
+  
+  def exit(opts = {})
+    opts = {code: opts} if opts.is_a?(Fixnum)
+    clear_pass
+    puts opts[:msg] if opts[:msg]
+    Kernel.exit opts[:code].to_i
+  end # exit -------------------------------------------------------------------
 end
+
+vcm = VCMounter.new "#{File.dirname(__FILE__)}/vc-mounter.yml"
+at_exit { vcm.clear_pass rescue nil } # ensure clear pass at exit without modifying exit status
+vcm.run ARGV
