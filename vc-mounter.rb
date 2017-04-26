@@ -9,16 +9,33 @@ Signal.trap('INT'){} # trap ^C
 STDOUT.sync = true   # autoflush
 
 class VCMounter
+  ENCRYPTION_ALGORITHMS = %w{
+    AES  Camellia  Kuznyechik  Serpent  Twofish
+    AES-Twofish  Serpent-AES  Twofish-Serpent
+    AES-Twofish-Serpent Serpent-Twofish-AES
+  }
+
   def initialize(cfg_file = 'vc-mounter.yml')
     @cfg  = OpenStruct.new YAML.load_file(cfg_file)
     @cfg.mount_opts ||= 'users,rw,suid,exec,async'
     
     @pass = ' ' * 100
     @pim  = ' ' * 100 # personal iteration number
+    @algo = ' ' * 100 # encryption algorithm
   end # initialize -------------------------------------------------------------
+
+  def set_cpu_governor(g); system "echo #{g} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"; end
+  def set_cpu_max
+    @prev_governor = `/usr/bin/cpufreq-info -c 0`.split("\n").grep(/The governor/).first.to_s.sub(/.+"(.+)".+/, '\1')
+    @prev_governor = :powersave if @prev_governor.empty?
+    set_cpu_governor :performance
+  end # set_cpu_max ------------------------------------------------------------
+  def set_cpu_prev; set_cpu_governor @prev_governor; end
   
   def run(args)
     exit code: 2, msg: 'you are not root!' if `whoami`.strip != 'root'
+
+    set_cpu_max
     
     case args[0].to_s
       when 'fsck+mount' # system mount
@@ -59,10 +76,13 @@ class VCMounter
     opts = {map: true, mount: true, keep_pass: false}.merge(opts)
 
     loop do
-      if @pass.strip.empty? # ask password+pim
-        @pass = `systemd-ask-password "Enter encrypted volumes password:"`.strip
-        @pim  = `systemd-ask-password "Enter encrypted volumes PIM:"     `.strip unless @pass == 'quit'
-        if [@pass, @pim].include?('quit')
+      if @pass.strip.empty? # ask password/pim/algo
+        @pass = `systemd-ask-password "Enter encrypted volumes password:" `.strip
+        @pim  = `systemd-ask-password "Enter encrypted volumes PIM:"      `.strip unless @pass == 'quit'
+        #puts "Available encryption algorithms:" + ENCRYPTION_ALGORITHMS.
+        #  each_with_index.map{|a, i| %Q|#{"\n" if i%4==0}[#{i}] #{a}|}.join(', ')
+        #@algo = `systemd-ask-password "Enter encrypted volumes Algorithm num.:"`.strip.to_i unless [@pass, @pim].include?('quit')
+        if [@pass, @pim, @algo].include?('quit')
           puts "NOT mounting as requested."
           break
         end
@@ -93,7 +113,8 @@ class VCMounter
     if opts[:map] && !status.mapped && !status.mounted
       Open3.popen3(
         "sudo -u #{@cfg.user}" +
-        "  #{@cfg.app} -v -k \"\" --protect-hidden=no --filesystem=none" +
+        "  #{@cfg.app} -v -k '' --protect-hidden=no --filesystem=none" +
+        #"  --encryption=#{ENCRYPTION_ALGORITHMS[@algo]}"+
         "  /dev/disk/by-id/#{id} #{mp.shellescape}"
       ) do |si, so, se|
         si.puts @pass.to_s
@@ -182,8 +203,10 @@ class VCMounter
     # clean password
     @pass.size.times{|i| @pass[i] = rand(100).chr }
     @pim .size.times{|i| @pim[i]  = rand(100).chr }
+    #@algo.size.times{|i| @pim[i]  = rand(100).chr }
     @pass = ' ' * 100
     @pim  = ' ' * 100 # personal iteration number
+    #@algo = ' ' * 100
     GC.enable
     GC.start
   end # clear_pass -------------------------------------------------------------
@@ -225,6 +248,7 @@ class VCMounter
   
   def exit(opts = {})
     opts = {code: opts} if opts.is_a?(Fixnum)
+    set_cpu_prev
     clear_pass
     puts opts[:msg] if opts[:msg]
     Kernel.exit opts[:code].to_i
@@ -232,5 +256,8 @@ class VCMounter
 end
 
 vcm = VCMounter.new "#{File.dirname(__FILE__)}/vc-mounter.yml"
-at_exit { vcm.clear_pass rescue nil } # ensure clear pass at exit without modifying exit status
+at_exit do
+  vcm.set_cpu_prev
+  vcm.clear_pass rescue nil # ensure clear pass at exit without modifying exit status
+end
 vcm.run ARGV
