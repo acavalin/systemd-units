@@ -4,30 +4,50 @@ require 'yaml'       # config parsing
 require 'open3'      # run command with STDIN/OUT access
 require 'ostruct'    # hash to object utility
 require 'shellwords' # escape strings for the shell
+require 'fileutils'  # symlinks & mkdir_p utils
+require 'pathname'   # mountpoint?
 
 Signal.trap('INT'){} # trap ^C
 STDOUT.sync = true   # autoflush
 
 class VCMounter
-  ENCRYPTION_ALGORITHMS = %w{
+  HASH_ALGOS = %w{ sha256 sha512 whirlpool ripemd160 }
+  
+  ENC_ALGOS = %w{
     AES  Camellia  Kuznyechik  Serpent  Twofish
     AES-Twofish  Serpent-AES  Twofish-Serpent
     AES-Twofish-Serpent Serpent-Twofish-AES
   }
 
+  DEV_CACHE = %w{ /run/shm /dev/shm /tmp }.detect{|d| File.exists?(d) } + '/vc-mounter'
+
+  ON_RASPI = File.read('/sys/firmware/devicetree/base/model') =~ /Raspberry Pi/i rescue false
+
   def initialize(cfg_file = 'vc-mounter.yml')
     @cfg  = OpenStruct.new YAML.load_file(cfg_file)
     @cfg.mount_opts ||= 'users,rw,suid,exec,async'
     
+    # make a backup of the devices links
+    FileUtils.mkdir_p DEV_CACHE
+    Dir.chdir('/dev/disk/by-id/') do
+      @cfg.mounts.
+        select{|id, mp| File.exists?(id) && File.exists?(mp) }.
+        each do |id, mp|
+          d = File.expand_path File.readlink("/dev/disk/by-id/#{id}")
+          FileUtils.symlink d, "#{DEV_CACHE}/#{id}", force: true
+        end
+    end
+
     @pass = ' ' * 100
-    @pim  = ' ' * 100 # personal iteration number
+    @pim  = ' ' * 100 # personal iteration multiplier
     @algo = ' ' * 100 # encryption algorithm
+    @hash = ' ' * 100 # hash algorithm
   end # initialize -------------------------------------------------------------
 
   def set_cpu_governor(g); `echo #{g} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`; end
   def set_cpu_max
     @prev_governor = `/usr/bin/cpufreq-info -c 0`.split("\n").grep(/The governor/).first.to_s.sub(/.+"(.+)".+/, '\1')
-    @prev_governor = :powersave if @prev_governor.empty?
+    @prev_governor = :ondemand if @prev_governor.empty?
     set_cpu_governor :performance
   end # set_cpu_max ------------------------------------------------------------
   def set_cpu_prev; set_cpu_governor @prev_governor; end
@@ -54,8 +74,26 @@ class VCMounter
       
       when 'try-umount' # system umount
         print 'Unmounting all encrypted volumes... '
-        exit (dismount_volumes(force: false) || dismount_volumes(force: true)) ?
+
+        ris = (dismount_volumes(force: false) || dismount_volumes(force: true)) ?
           {code: 0, msg: 'done.' } : {code: 2, msg: "ERROR!\n#{managed_volumes_list}"}
+
+        if ON_RASPI
+          # veracrypt and systemd doesn't play well together on raspi during shutdown
+          # (no volumes are listed) so we try to manually dismount all mounted mountpoints:
+          `sync`
+          puts ''
+          existing_volumes.each do |id, mp|
+            next unless Pathname.new(mp).mountpoint? # true if mounted
+            puts "ENFORCING UMOUNT OF: #{mp} @ #{id}"
+            `fuser -vmk #{mp.shellescape}` # kill everything running inside
+            `umount #{mp.shellescape}`
+          end
+          `losetup --detach-all` # reset all /dev/loop* devices
+          `sync`
+        end
+
+        exit ris
       
       when 'mount'      # manual mount
         mount_all
@@ -78,11 +116,16 @@ class VCMounter
     loop do
       if @pass.strip.empty? # ask password/pim/algo
         @pass = `systemd-ask-password "Enter encrypted volumes password:" `.strip
+
         @pim  = `systemd-ask-password "Enter encrypted volumes PIM:"      `.strip unless @pass == 'quit'
-        #puts "Available encryption algorithms:" + ENCRYPTION_ALGORITHMS.
-        #  each_with_index.map{|a, i| %Q|#{"\n" if i%4==0}[#{i}] #{a}|}.join(', ')
-        #@algo = `systemd-ask-password "Enter encrypted volumes Algorithm num.:"`.strip.to_i unless [@pass, @pim].include?('quit')
-        if [@pass, @pim, @algo].include?('quit')
+
+        msg = "HASH: " + HASH_ALGOS.each_with_index.map{|a, i| %Q|[#{i}] #{a}|}.join(', ') + " | Num:"
+        @hash = `systemd-ask-password "#{msg}"`.strip unless [@pass, @pim].include?('quit')
+
+        #msg = "ENC: " + ENC_ALGOS.each_with_index.map{|a, i| %Q|[#{i}] #{a}|}.join(', ') + " | Num:"
+        #@algo = `systemd-ask-password "#{msg}"`.strip unless [@pass, @pim, @hash].include?('quit')
+
+        if [@pass, @pim, @hash, @algo].include?('quit')
           puts "NOT mounting as requested."
           break
         end
@@ -111,12 +154,14 @@ class VCMounter
     status = volume_status id, mp
     
     if opts[:map] && !status.mapped && !status.mounted
-      Open3.popen3(
-        "sudo -u #{@cfg.user}" +
-        "  #{@cfg.app} -v -k '' --protect-hidden=no --filesystem=none" +
-        #"  --encryption=#{ENCRYPTION_ALGORITHMS[@algo]}"+
-        "  /dev/disk/by-id/#{id} #{mp.shellescape}"
-      ) do |si, so, se|
+      Open3.popen3([
+        "sudo -u #{@cfg.user}",
+        "  #{@cfg.app} -v -k '' --protect-hidden=no --filesystem=none",
+        (' -m nokernelcrypto'                     if ON_RASPI                 ),
+        (" --hash=#{HASH_ALGOS[@hash.to_i]}"      if @hash.to_s.strip.size > 0),
+        (" --encryption=#{ENC_ALGOS[@algo.to_i]}" if @algo.to_s.strip.size > 0),
+        "  #{DEV_CACHE}/#{id} #{mp.shellescape}",
+      ].compact.join(' ')) do |si, so, se|
         si.puts @pass.to_s
         si.puts @pim .to_s
       end
@@ -131,11 +176,12 @@ class VCMounter
       print "\b#{status.mounted ? 'M' : '-'}"
     end
     
-    # disable sleep timeout for usb drives
-    if id.match(/^usb/)
-      ris = system("hdparm -q -S 0 #{id.sub /-part.$/, ''} 2> /dev/null")
-      print ris ? 'S' : 's'
-    end
+    # managed by /etc/hdparm.conf
+    ## disable sleep timeout for usb drives
+    #if id.match(/^usb/)
+    #  ris = system("hdparm -q -S 0 #{id.sub /-part.$/, ''} 2> /dev/null")
+    #  print ris ? 'S' : 's'
+    #end
     
     print "_\b"
     sleep 3
@@ -180,13 +226,14 @@ class VCMounter
   
   def dismount_volumes(opts = {})
     opts = {force: false}.merge(opts)
-  
+
     sleep 0.5
     
     if opts[:force]
       puts "Killing open processes..."
-      mounted_volumes.each{|v| system %Q|fuser -vmk #{v.mnt_dir.shellescape}| }
-      `#{@cfg.app} --force -d`
+      mounted_volumes.each{|id, mp| system %Q|fuser -vmk #{mp.shellescape}| }
+      `#{@cfg.app} -d`
+      `#{@cfg.app} --force -d` # if $?.to_i != 0
     else
       `#{@cfg.app} -d`
     end
@@ -203,21 +250,23 @@ class VCMounter
     # clean password
     @pass.size.times{|i| @pass[i] = rand(100).chr }
     @pim .size.times{|i| @pim[i]  = rand(100).chr }
-    #@algo.size.times{|i| @pim[i]  = rand(100).chr }
+    @hash.size.times{|i| @hash[i] = rand(100).chr }
+    @algo.size.times{|i| @pim[i]  = rand(100).chr }
     @pass = ' ' * 100
     @pim  = ' ' * 100 # personal iteration number
-    #@algo = ' ' * 100
+    @hash = ' ' * 100
+    @algo = ' ' * 100
     GC.enable
     GC.start
   end # clear_pass -------------------------------------------------------------
   
   def volume_exists?(id, mp)
-    File.exists?("/dev/disk/by-id/#{id}") && File.exists?(mp)
+    File.exists?("#{DEV_CACHE}/#{id}") && File.exists?(mp)
   end # volume_exists? ---------------------------------------------------------
   
   def volume_status(id, mp)
     sleep 0.5
-    info     = `#{@cfg.app} --volume-properties /dev/disk/by-id/#{id} 2> /dev/null`.split("\n")
+    info     = `#{@cfg.app} --volume-properties #{DEV_CACHE}/#{id} 2> /dev/null`.split("\n")
     virt_dev = info.grep(/Device/)[0].to_s.split(':')[1].to_s.strip
     mnt_dir  = info.grep(/Mount/ )[0].to_s.split(':')[1].to_s.strip
     OpenStruct.new mapped:  File.exists?(virt_dev),
@@ -239,7 +288,7 @@ class VCMounter
   end # mounted_volumes --------------------------------------------------------
   
   def managed_volumes_list
-    `#{@cfg.app} -l 2>&1`.gsub(/.dev.disk.by-id./,'').gsub(/^/,'  * ')
+    `#{@cfg.app} -l 2>&1`.gsub("#{DEV_CACHE}/",'').gsub(/^/,'  * ')
   end # managed_volumes_list ---------------------------------------------------
   
   
