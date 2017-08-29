@@ -4,7 +4,7 @@
 
 [Unit]
 Description = TMPfs directory mounter
-ConditionFileIsExecutable = /opt/myapps/lnx/systemd-units/tmpfs-folders.sh
+ConditionFileIsExecutable = /opt/systemd-units/tmpfs-folders.sh
 DefaultDependencies = no
 Requires  = sysinit.target local-fs.target
 After     = sysinit.target local-fs.target
@@ -12,7 +12,7 @@ Before    = basic.target
 
 [Service]
 Type      = oneshot
-ExecStart = /opt/myapps/lnx/systemd-units/tmpfs-folders.sh
+ExecStart = /opt/systemd-units/tmpfs-folders.sh
 SuccessExitStatus = 1
 
 [Install]

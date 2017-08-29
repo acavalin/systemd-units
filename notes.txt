@@ -3,7 +3,7 @@ https://www.google.it/?gws_rd=ssl#q=systemd%20how%20to%20create%20a%20service
 https://coreos.com/docs/launching-containers/launching/getting-started-with-systemd/
 
 SETUP:
-  - ln -f /opt/myapps/lnx/systemd-units/name.service /lib/systemd/system/
+  - ln -f /opt/systemd-units/name.service /lib/systemd/system/
   - systemctl enable name.service
 
 REFERENCES:
