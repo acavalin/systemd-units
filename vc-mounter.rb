@@ -11,7 +11,7 @@ Signal.trap('INT'){} # trap ^C
 STDOUT.sync = true   # autoflush
 
 class VCMounter
-  HASH_ALGOS = %w{ sha256 sha512 whirlpool ripemd160 }
+  HASH_ALGOS = %w{ sha256 sha512 whirlpool ripemd160 streebog }
   
   ENC_ALGOS = %w{
     AES  Camellia  Kuznyechik  Serpent  Twofish
