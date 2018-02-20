@@ -25,7 +25,7 @@ class VCMounter
 
   def initialize(cfg_file = 'vc-mounter.yml')
     @cfg  = OpenStruct.new YAML.load_file(cfg_file)
-    @cfg.mount_opts ||= 'users,rw,suid,exec,async'
+    @cfg.mount_opts ||= 'users,rw,suid,exec,async,nodiscard'
     
     # make a backup of the devices links
     FileUtils.mkdir_p DEV_CACHE
@@ -154,10 +154,28 @@ class VCMounter
     status = volume_status id, mp
     
     if opts[:map] && !status.mapped && !status.mounted
+      # DO NOT USE THE LINUX NATIVE KERNEL CRYPTOGRAPHIC SERVICES TO DISABLE "TRIM"
+      # OPERATION ON SSD DRIVES, SEE:
+      #  - https://www.veracrypt.fr/en/Trim%20Operation.html
+      #  - http://asalor.blogspot.it/2011/08/trim-dm-crypt-problems.html
+      #    - If there is a strong requirement that information about unused sectors must not be available to attacker, TRIM must be always disabled.
+      #    - TRIM must not be used if there is a hidden device on the disk. (In this case TRIM would either erase the hidden data or reveal its position.)
+      #    - If TRIM is enabled and executed later (even only once by setting option and calling fstrim), this operation is irreversible.
+      #      Discarded sectors are still detectable even if TRIM is disabled again.
+      #    - In specific cases (depends on data patterns) some information could leak from the ciphertext device.
+      #      (In example above you can recognize filesystem type for example.)
+      #    - Encrypted disk cannot support functions which rely on returning zeroes of discarded sectors (even if underlying device announces such capability).
+      #    - Recovery of erased data on SSDs (especially using TRIM) requires completely new ways and tools.
+      #      Using standard recovery tools is usually not successful.
+      device_blk = File.basename File.readlink("#{DEV_CACHE}/#{id}")
+      device_blk = device_blk.sub(/(mmc.+)p[0-9]+/i, '\1') if device_blk =~ /^mmc/
+      device_blk = device_blk.sub(/([a-z]+).*/i, '\1') if device_blk =~ /^[sh]d/
+      is_ssd = File.read("/sys/block/#{device_blk}/queue/rotational").to_i == 0
+      
       Open3.popen3([
         "sudo -u #{@cfg.user}",
         "  #{@cfg.app} -v -k '' --protect-hidden=no --filesystem=none",
-        (' -m nokernelcrypto'                     if ON_RASPI                 ),
+        (' -m nokernelcrypto'                     if is_ssd || ON_RASPI       ),
         (" --hash=#{HASH_ALGOS[@hash.to_i]}"      if @hash.to_s.strip.size > 0),
         (" --encryption=#{ENC_ALGOS[@algo.to_i]}" if @algo.to_s.strip.size > 0),
         "  #{DEV_CACHE}/#{id} #{mp.shellescape}",
