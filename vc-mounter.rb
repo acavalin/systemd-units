@@ -44,7 +44,14 @@ class VCMounter
     @hash = ' ' * 100 # hash algorithm
   end # initialize -------------------------------------------------------------
 
-  def set_cpu_governor(g); `echo #{g} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`; end
+  def set_cpu_governor(g)
+    # intel_pstates is all you need, don't bother changing the governor:
+    #   https://bbs.archlinux.org/viewtopic.php?pid=1303796#p1303796
+    #   https://plus.google.com/+TheodoreTso/posts/2vEekAsG2QT
+    return if `cpufreq-info -c 0 -d`.strip == 'intel_pstate'
+
+    `echo #{g} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
+  end
   def set_cpu_max
     @prev_governor = `/usr/bin/cpufreq-info -c 0`.split("\n").grep(/The governor/).first.to_s.sub(/.+"(.+)".+/, '\1')
     @prev_governor = :ondemand if @prev_governor.empty?
