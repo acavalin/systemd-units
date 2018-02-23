@@ -1,6 +1,10 @@
 #!/bin/sh
 
 # ------------------------------------------------------------------------------
+# /etc/fstab:
+#   none  /tmp       tmpfs  defaults,user,size=512M,exec 0 0
+#   none  /mnt/ramd  tmpfs  defaults,user,size=512M,exec 0 0
+#
 # create tgz directory skeleton:
 #   # see also clear_var_log.sh for crontab usage
 #   ./clear_var_log.sh
@@ -32,10 +36,6 @@ if grep -qs /dev/shm /proc/mounts && [ -d $RAM_ROOT ]; then
 
   mkdir -p $RAM_DIR
 
-  # /etc/fstab:
-  #   none  /tmp       tmpfs  defaults,user,size=512M,exec 0 0
-  #   none  /mnt/ramd  tmpfs  defaults,user,size=512M,exec 0 0
-
   # /var/log
   if [ -f "$DATA_DIR/var.tgz" ]; then
     mkdir -p $RAM_DIR/var
@@ -48,7 +48,7 @@ if grep -qs /dev/shm /proc/mounts && [ -d $RAM_ROOT ]; then
     mkdir -m 775 -p     $RAM_DIR/home
     chown -R root.users $RAM_DIR/home
     # drop old dir and make a link to the new one
-    [ -d $RAM_DIR ] && rm -rf /home
+    rm -rf /home
     ln -sf $RAM_DIR/home/ /home
     # extract the archive of /home
     tar -C $RAM_DIR/home -xzf "$DATA_DIR/homes.tgz" || exit 21
