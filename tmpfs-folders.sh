@@ -5,6 +5,12 @@
 #   none  /tmp       tmpfs  defaults,user,size=512M,exec 0 0
 #   none  /mnt/ramd  tmpfs  defaults,user,size=512M,exec 0 0
 #
+# If you get this error in your syslog at boot time:
+#   systemd[1]: tmp.mount: Directory /tmp to mount over is not empty, mounting anyway.
+# then add "-E PULSE_RUNTIME_PATH=/run/alsa/runtime" to /lib/udev/rules.d/90-alsa-restore.rules file.
+# See also: "pulseaudio: leaves empty /tmp/pulse-* directory behind"
+#   https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=561777
+# ------------------------------------------------------------------------------
 # create tgz directory skeleton:
 #   # see also clear_var_log.sh for crontab usage
 #   ./clear_var_log.sh
