@@ -5,19 +5,20 @@
 Description = VeraCrypt volumes mounter
 ConditionFileIsExecutable = /opt/systemd-units/vc-mounter.rb
 DefaultDependencies = no
+RequiresMountsFor   = /
 Requires  = sysinit.target local-fs.target
 After     = sysinit.target local-fs.target
-Before    = basic.target shutdown.target
-Conflicts = shutdown.target
+Before    = shutdown.target reboot.target halt.target kexec.target basic.target
+Conflicts = shutdown.target reboot.target halt.target kexec.target
+
+[Install]
+WantedBy  = basic.target multi-user.target
 
 [Service]
 Type      = oneshot
 ExecStart = /opt/systemd-units/vc-mounter.rb fsck+mount
 ExecStop  = /opt/systemd-units/vc-mounter.rb try-umount
-#ExecStop  = /opt/systemd-units/vc-mounter-test.sh
+#ExecStop = /opt/systemd-units/vc-mounter-test.sh
 RemainAfterExit   = yes
 SuccessExitStatus = 1
 StandardOutput    = journal+console
-
-[Install]
-WantedBy  = basic.target

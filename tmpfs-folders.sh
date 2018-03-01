@@ -14,7 +14,9 @@
 # create tgz directory skeleton:
 #   # see also clear_var_log.sh for crontab usage
 #   ./clear_var_log.sh
-#   cd /var && find log -type d | tar -czvf /tmp/var.tgz --no-recursion --files-from -
+#   cd /var && find log -type d | tar -czvf /opt/systemd-units/tmpfs-folders/var-empty.tgz --no-recursion --files-from -
+#   cd /var && tar -czvf /opt/systemd-units/tmpfs-folders/var-full.tgz log
+#   cd /opt/systemd-units/tmpfs-folders ; ln -sf var-xxxx.tgz var.tgz # choose one
 #
 #   cd /root && tar -czvf /opt/systemd-units/tmpfs-folders/root_home.tgz .
 #   cd /home && tar -czvf /opt/systemd-units/tmpfs-folders/homes.tgz .
