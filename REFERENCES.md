@@ -22,17 +22,23 @@ Note that `DefaultDependencies = true` implies:
 * `Before    = shutdown.target            `
 
 ### [EARLY START](http://lists.freedesktop.org/archives/systemd-devel/2010-September/000225.html)
-> [Unit]
-> DefaultDependencies = no
-> Requires  = sysinit.target local-fs.target
-> After     = sysinit.target local-fs.target
-> Before    = basic.target
-> [Install]
-> WantedBy  = basic.target
+
+```ini
+[Unit]
+DefaultDependencies = no
+Requires  = sysinit.target local-fs.target
+After     = sysinit.target local-fs.target
+Before    = basic.target
+[Install]
+WantedBy  = basic.target
+```
 
 ### ONESHOTs: this combination stops the execution of both Start and Stop
-> Type = oneshot
-> RemainAfterExit = yes
+
+```ini
+Type = oneshot
+RemainAfterExit = yes
+```
 
 ### DEBUG E LOGS:
 * `journalctl`
