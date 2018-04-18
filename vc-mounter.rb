@@ -258,6 +258,12 @@ class VCMounter
     opts = {force: false}.merge(opts)
 
     sleep 0.5
+
+    # swapoff any swap file within mounted volumes
+    sw_files = `sudo swapon | grep " file " | cut -f 1 -d " "`.strip.split("\n")
+    mounted_volumes.each do |id, mp|
+      sw_files.each{|f| system "sudo swapoff #{f.shellescape}" if f.include?(mp) }
+    end
     
     if opts[:force]
       puts "Killing open processes..."
