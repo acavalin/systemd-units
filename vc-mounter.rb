@@ -15,8 +15,8 @@ class VCMounter
   
   ENC_ALGOS = %w{
     AES  Camellia  Kuznyechik  Serpent  Twofish
-    AES-Twofish  Serpent-AES  Twofish-Serpent
-    AES-Twofish-Serpent Serpent-Twofish-AES
+    AES-Twofish  Serpent-AES  Camellia-Serpent  Kuznyechik-AES  Kuznyechik-Twofish  Twofish-Serpent
+    AES-Twofish-Serpent Serpent-Twofish-AES  Kuznyechik-Serpent-Camellia
   }
 
   DEV_CACHE = %w{ /run/shm /dev/shm /tmp }.detect{|d| File.exists?(d) } + '/vc-mounter'
