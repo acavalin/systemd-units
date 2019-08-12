@@ -334,7 +334,7 @@ class VCMounter
   
   
   def exit(opts = {})
-    opts = {code: opts} if opts.is_a?(Fixnum)
+    opts = {code: opts} if opts.is_a?(Numeric)
     set_cpu_prev
     clear_pass
     puts opts[:msg] if opts[:msg]
