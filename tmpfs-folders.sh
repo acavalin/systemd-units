@@ -1,5 +1,6 @@
 #!/bin/sh
 
+# SETUP INSTRUCTIONS
 # ------------------------------------------------------------------------------
 # /etc/fstab:
 #   none  /tmp       tmpfs  defaults,user,size=512M,exec 0 0
@@ -10,6 +11,9 @@
 # then add "-E PULSE_RUNTIME_PATH=/run/alsa/runtime" to /lib/udev/rules.d/90-alsa-restore.rules file.
 # See also: "pulseaudio: leaves empty /tmp/pulse-* directory behind"
 #   https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=561777
+# ------------------------------------------------------------------------------
+# If using systemd then make sure to set RemoveIPC=no in /etc/systemd/logind.conf
+# see https://superuser.com/questions/1117764/why-are-the-contents-of-dev-shm-is-being-removed-automatically/1179962#1179962
 # ------------------------------------------------------------------------------
 # create tgz directory skeleton:
 #   # see also clear_var_log.sh for crontab usage

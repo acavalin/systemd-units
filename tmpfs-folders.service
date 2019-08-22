@@ -1,6 +1,6 @@
 ; A big step towards read only root file system to save preciuos disk
 ; read/writes. Mounts /var/log and user homes directories on tmpfs.
-; SETUP: create directory skeletons (see instructions tmpfs-folders.sh)
+; SETUP: see instructions in tmpfs-folders.sh
 
 [Unit]
 Description = TMPfs directory mounter
