@@ -1,0 +1,15 @@
+; Systemd spind down disks before shutdown
+
+[Unit]
+Description=HDD spindown service
+DefaultDependencies=no
+After=umount.target
+Before=shutdown.target reboot.target halt.target
+
+[Service]
+ExecStart=/opt/systemd-units/spindown-disks.sh
+Type=oneshot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=shutdown.target
