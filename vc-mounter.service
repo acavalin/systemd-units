@@ -8,16 +8,16 @@ DefaultDependencies = no
 RequiresMountsFor   = /
 Requires  = sysinit.target local-fs.target
 After     = sysinit.target local-fs.target
-Before    = shutdown.target reboot.target halt.target kexec.target basic.target
-Conflicts = shutdown.target reboot.target halt.target kexec.target
+Before    = shutdown.target kexec.target basic.target dbus.service
+Conflicts = shutdown.target kexec.target
 
 [Install]
 WantedBy  = basic.target multi-user.target
 
 [Service]
 Type      = oneshot
-ExecStart = /opt/systemd-units/vc-mounter.rb fsck+mount
-ExecStop  = /opt/systemd-units/vc-mounter.rb try-umount
+ExecStart = /opt/systemd-units/vc-mounter.rb mount  -c
+ExecStop  = /opt/systemd-units/vc-mounter.rb umount -f
 #ExecStop = /opt/systemd-units/vc-mounter-test.sh
 RemainAfterExit   = yes
 SuccessExitStatus = 1
