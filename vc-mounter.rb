@@ -129,7 +129,7 @@ class VCMounter
       end # run script
       
       # 2. dismount virtual volume
-      dismount_output = %x| #{@config['app']} -d #{props['dev_cache'].shellescape} 2>&1 |.strip
+      dismount_output = %x| #{@config['app']} -t -d #{props['dev_cache'].shellescape} 2>&1 |.strip
       puts $?.to_i == 0 ? 'OK' : dismount_output
       
       # 3. try brute force only when requested and failed umount
@@ -178,8 +178,8 @@ class VCMounter
       end # if mounted
       
       puts '- retry dismount'
-      system %Q| #{@config['app']}         -d #{props['dev_cache'].shellescape} > /dev/null 2>&1 |
-      system %Q| #{@config['app']} --force -d #{props['dev_cache'].shellescape}             2>&1 | if $?.to_i != 0
+      system %Q| #{@config['app']} -t         -d #{props['dev_cache'].shellescape} > /dev/null 2>&1 |
+      system %Q| #{@config['app']} -t --force -d #{props['dev_cache'].shellescape}             2>&1 | if $?.to_i != 0
       
       if $?.to_i != 0 && props['map_type'] == 'loop' && File.exist?(props['virtual_device'])
         puts '- detaching loop device'
@@ -218,7 +218,7 @@ class VCMounter
     mappable_volumes.each do |name, props|
       print " #{name}"
       app_cmd = %Q| #{@config['app'].shellescape} \
-        -v -k '' --protect-hidden=no --filesystem=none \
+        -t -v -k '' --protect-hidden=no --filesystem=none \
         #{ '-m nokernelcrypto'                               if props['is_ssd'] || ON_RASPI } \
         #{ "--hash=#{HASH_ALGOS[@params['hash'].to_i]}"      if @params['hash'].present?    } \
         #{ "--encryption=#{ENC_ALGOS[@params['enca'].to_i]}" if @params['enca'].present?    } \
@@ -325,7 +325,7 @@ class VCMounter
   def volumes_status
     # build an info hash from veracrypt properties: {device_basename => info_hash}
     app_info = {}
-    `#{@config['app'].shellescape} --volume-properties 2> /dev/null`.strip.split(/^$/).each do |text_block|
+    `#{@config['app'].shellescape} -t --volume-properties 2> /dev/null`.strip.split(/^$/).each do |text_block|
       info = text_block.strip.split("\n").inject({}){|h, text_line|
         k, v = text_line.split(': ', 2)
         h.merge k.downcase.tr(' -', '__').delete('()') => v
@@ -381,7 +381,9 @@ class VCMounter
   end # volumes_status ---------------------------------------------------------
   
   def spindown_disk(device)
-    %x| /sbin/hdparm -y #{device} 2>&1 | if File.blockdev?(device)
+    return unless File.blockdev?(device)
+    sleep 2
+    %x| /sbin/hdparm -y #{device} 2>&1 |
   end # spindown_disk ----------------------------------------------------------
   
   # set cpu governor to "performance"
