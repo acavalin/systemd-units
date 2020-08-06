@@ -114,8 +114,17 @@ class VCMounter
     
     die "no mapped volume found", code: 0 if mapped_volumes.empty?
     
+    if @options[:daemon]
+      logfile = '/tmp/vc-mounter-daemon.log'
+      puts "Running in daemon mode, logs @ #{logfile}"
+      Process.daemon
+      STDOUT.reopen logfile, 'a'
+      STDERR.reopen logfile, 'a'
+    end
+    
     puts "Dismounting decrypted volumes: syncing..."
     %x| sync | # flush disk writes
+    
     mapped_volumes.each do |name, props|
       print " => #{name}: "
       
@@ -139,12 +148,6 @@ class VCMounter
       end
 
       if @options[:daemon]
-        logfile = '/tmp/vc-mounter-daemon.log'
-        puts '    => brute forcing dismount in daemon mode:'
-        puts "    => see #{logfile}"
-        Process.daemon
-        STDOUT.reopen logfile, 'a'
-        STDERR.reopen logfile, 'a'
         puts "\n----- #{Time.now.strftime '%F %H:%M'} | #{name} | #{props['dev']} -----"
       else
         puts '    => brute forcing dismount:'
