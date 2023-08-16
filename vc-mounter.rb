@@ -231,9 +231,11 @@ class VCMounter
     
     if opts[:force]
       puts "Killing open processes..."
+      `exportfs -ua` # stop NFS server
       mounted_volumes.each{|id, mp| system %Q|fuser -vmk #{mp.shellescape}| }
       `#{@cfg.app} -d`
       `#{@cfg.app} --force -d` # if $?.to_i != 0
+      `exportfs -ra` # restart NFS server
     else
       `#{@cfg.app} -d`
     end
