@@ -185,8 +185,7 @@ class VCMounter
       is_ssd = File.read("/sys/block/#{device_blk}/queue/rotational").to_i == 0
       
       Open3.popen3([
-        "sudo -u #{@cfg.user}",
-        "  #{@cfg.app} -v -k '' --protect-hidden=no --filesystem=none",
+        "#{@cfg.app} -v -k '' --protect-hidden=no --filesystem=none",
         (' -m nokernelcrypto'                     if is_ssd || ON_RASPI       ),
         (" --hash=#{HASH_ALGOS[@hash.to_i]}"      if @hash.to_s.strip.size > 0),
         (" --encryption=#{ENC_ALGOS[@algo.to_i]}" if @algo.to_s.strip.size > 0),
@@ -201,7 +200,7 @@ class VCMounter
     end
   
     if opts[:mount] && status.mapped && !status.mounted
-      system "sudo mount -o #{@cfg.mount_opts} #{status.map_dev} #{mp}"
+      system "mount -o #{@cfg.mount_opts} #{status.map_dev} #{mp}"
       status = volume_status id, mp
       print "\b#{status.mounted ? 'M' : '-'}"
     end
@@ -260,9 +259,9 @@ class VCMounter
     sleep 0.5
 
     # swapoff any swap file within mounted volumes
-    sw_files = `sudo swapon | grep " file " | cut -f 1 -d " "`.strip.split("\n")
+    sw_files = `swapon | grep " file " | cut -f 1 -d " "`.strip.split("\n")
     mounted_volumes.each do |id, mp|
-      sw_files.each{|f| system "sudo swapoff #{f.shellescape}" if f.include?(mp) }
+      sw_files.each{|f| system "swapoff #{f.shellescape}" if f.include?(mp) }
     end
     
     if opts[:force]
