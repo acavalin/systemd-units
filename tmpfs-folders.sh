@@ -2,8 +2,8 @@
 
 # ------------------------------------------------------------------------------
 # create tgz directory skeleton:
-#   find /var/log -path /var/log/installer -prune -o -type f -exec dd if=/dev/null of="{}" \;
-#   find /var/log -name "*.[0-9].gz" -exec rm -f "{}" \;
+#   # see also clear_var_log.sh for crontab usage
+#   ./clear_var_log.sh
 #   cd /var && find log -type d | tar -czvf /tmp/var.tgz --no-recursion --files-from -
 #
 #   cd /root && tar -czvf /opt/systemd-units/tmpfs-folders/root_home.tgz .
