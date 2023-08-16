@@ -112,7 +112,7 @@ class VCMounter
       select{|name, props| props['mapped'] && (@options[:volume].blank? || name == @options[:volume]) }
     debug mapped_volumes
     
-    die "no mapped volume found", code: 0 if mapped_volumes.empty?
+    puts "NOTICE: no mapped volume/s found" if mapped_volumes.empty?
     
     if @options[:daemon]
       logfile = '/tmp/vc-mounter-daemon.log'
@@ -200,11 +200,11 @@ class VCMounter
       end
       
       spindown_disk props['dev_src']
-      
-      sleep 1
-      system %Q| /usr/sbin/shutdown -h 0 | if @options[:shutdown]
-      system %Q| /usr/sbin/shutdown -r 0 | if @options[:reboot  ]
     end # each mapped volume
+      
+    sleep 1
+    system %Q| /usr/sbin/shutdown -h 0 | if @options[:shutdown]
+    system %Q| /usr/sbin/shutdown -r 0 | if @options[:reboot  ]
   end # volumes_umount ---------------------------------------------------------
   
   def volumes_mount
