@@ -8,6 +8,13 @@
 #
 #   cd /root && tar -czvf /opt/systemd-units/tmpfs-folders/root_home.tgz .
 #   cd /home && tar -czvf /opt/systemd-units/tmpfs-folders/homes.tgz .
+#
+#   mkdir munin
+#   cp -ra /var/lib/munin       munin/db
+#   cp -ra /var/cache/munin/www munin/www
+#   cp -ra /var/log/munin       munin/log
+#   cp -ra /var/run/munin       munin/run
+#   tar -czvf /opt/systemd-units/tmpfs-folders/munin.tgz munin
 # ------------------------------------------------------------------------------
 
 PATH=/sbin:/bin
@@ -47,6 +54,10 @@ if grep -qs /dev/shm /proc/mounts && [ -d $RAM_ROOT ]; then
   mkdir -m 755 -p $RAM_DIR/root_home       || exit 31
   mount --bind    $RAM_DIR/root_home /root || exit 32
   tar -C $RAM_DIR/root_home -xzf "$DATA_DIR/root_home.tgz" || exit 33
+
+  if [ -f "$DATA_DIR/munin.tgz" ]; then
+    tar -C $RAM_DIR -xzf "$DATA_DIR/munin.tgz" || exit 33
+  fi
 
   exit 0
 else
