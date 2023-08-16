@@ -1,0 +1,7 @@
+---
+:app:  /opt/veracrypt/veracrypt.gui -t
+:user: username
+:mounts:
+  example1.vc: /mnt/example1
+  example2.vc: /mnt/example2
+  example3.vc: /mnt/example3
