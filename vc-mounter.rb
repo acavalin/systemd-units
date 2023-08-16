@@ -145,9 +145,14 @@ class VCMounter
       mounts = managed_volumes_list
       puts mounts
       
-      break if mountable_volumes.keys.all?{|id| mounts.match id.to_s }
+      #break if mountable_volumes.keys.all?{|id| mounts.match id.to_s }
+      if mountable_volumes.keys.all?{|id| mounts.match id.to_s }
+        clear_pass unless opts[:keep_pass]
+        break
+      end
       
-      clear_pass unless opts[:keep_pass]
+      # not all volumes are mounted, ask a new pass and retry
+      clear_pass
     end
     
     @pass == 'quit' ? :quit : :ok
