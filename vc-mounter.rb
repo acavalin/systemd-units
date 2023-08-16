@@ -24,7 +24,7 @@ class VCMounter
     @algo = ' ' * 100 # encryption algorithm
   end # initialize -------------------------------------------------------------
 
-  def set_cpu_governor(g); system "echo #{g} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"; end
+  def set_cpu_governor(g); `echo #{g} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`; end
   def set_cpu_max
     @prev_governor = `/usr/bin/cpufreq-info -c 0`.split("\n").grep(/The governor/).first.to_s.sub(/.+"(.+)".+/, '\1')
     @prev_governor = :powersave if @prev_governor.empty?
@@ -150,7 +150,7 @@ class VCMounter
   
   def fsck
     errors   = []
-    to_check = {}
+    to_check = []
   
     puts "Checking all encrypted volumes..."
     puts '-' * 79
@@ -161,7 +161,7 @@ class VCMounter
       
       if status.mapped && !status.mounted
         puts "  * #{name}: to be checked"
-        to_check[id] = name
+        to_check << status.map_dev
       else
         puts "  * #{name}: unmapped/missing! SKIPPING CHECK!"
         errors << "#{name}: skipped"
@@ -169,8 +169,8 @@ class VCMounter
     end
     
     # parallel filesytem check
-    unless system "fsck -M -a -C0 #{to_check.keys.join ' '}"
-      errors << "#{to_check.values.join ', '}: fsck errors"
+    unless system "fsck -M -a -C0 #{to_check.join ' '}"
+      errors << "fsck encountered some problems"
     end
     
     puts '-' * 79
