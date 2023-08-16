@@ -20,7 +20,7 @@ class VCMounter
     AES-Twofish-Serpent Serpent-Twofish-AES  Kuznyechik-Serpent-Camellia
   }
 
-  DEV_CACHE = %w{ /run/shm /dev/shm /tmp }.detect{|d| File.exists? d } + '/vc-mounter'
+  DEV_CACHE = %w{ /run/shm /dev/shm /tmp }.detect{|d| File.exist? d } + '/vc-mounter'
 
   ON_RASPI  = File.read('/sys/firmware/devicetree/base/model') =~ /Raspberry Pi/i rescue false
   
@@ -58,7 +58,7 @@ class VCMounter
     # make a backup of devices links
     FileUtils.mkdir_p DEV_CACHE
     @config['volumes'].to_h.each do |name, props|
-      next unless File.exists?(props['mp'])
+      next unless File.exist?(props['mp'])
       
       if File.exist?("/dev/disk/by-id/#{props['dev']}")
         device = File.readlink "/dev/disk/by-id/#{props['dev']}"
@@ -66,7 +66,7 @@ class VCMounter
         @config['volumes'][name]['dev_src'  ] = File.expand_path device
         @config['volumes'][name]['dev_cache'] = "#{DEV_CACHE}/#{props['dev']}"
         FileUtils.symlink @config['volumes'][name]['dev_src'], @config['volumes'][name]['dev_cache'], force: true
-      elsif File.exists?(props['dev'])
+      elsif File.exist?(props['dev'])
         @config['volumes'][name]['dev_src'  ] = File.expand_path props['dev']
         @config['volumes'][name]['dev_cache'] = "#{DEV_CACHE}/#{File.basename props['dev']}"
         FileUtils.symlink @config['volumes'][name]['dev_src'], @config['volumes'][name]['dev_cache'], force: true
