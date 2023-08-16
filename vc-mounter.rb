@@ -172,12 +172,12 @@ class VCMounter
         end
         
         puts '- killing open processes ----- first  try -----'
-        system %Q| /bin/fuser -vkm #{props['virtual_device'].shellescape} 2>&1 | ; sleep 1
+        system %Q| /usr/bin/fuser -vkm #{props['virtual_device'].shellescape} 2>&1 | ; sleep 1
         puts '- killing open processes ----- second try -----'
-        system %Q| /bin/fuser -vkm #{props['virtual_device'].shellescape} 2>&1 |
+        system %Q| /usr/bin/fuser -vkm #{props['virtual_device'].shellescape} 2>&1 |
         
         puts '- remount read-only'
-        system %Q| /bin/sync ; mount -o remount,ro #{props['virtual_device'].shellescape} 2>&1 |
+        system %Q| /usr/bin/sync ; mount -o remount,ro #{props['virtual_device'].shellescape} 2>&1 |
       end # if mounted
       
       puts '- retry dismount'
@@ -186,7 +186,7 @@ class VCMounter
       
       if $?.to_i != 0 && props['map_type'] == 'loop' && File.exist?(props['virtual_device'])
         puts '- detaching loop device'
-        system %Q| /sbin/losetup --detach #{props['virtual_device'].shellescape} 2>&1 |
+        system %Q| /usr/sbin/losetup --detach #{props['virtual_device'].shellescape} 2>&1 |
       end
       
       if nfs_active
@@ -202,8 +202,8 @@ class VCMounter
       spindown_disk props['dev_src']
       
       sleep 1
-      system %Q| /sbin/shutdown -h 0 | if @options[:shutdown]
-      system %Q| /sbin/shutdown -r 0 | if @options[:reboot  ]
+      system %Q| /usr/sbin/shutdown -h 0 | if @options[:shutdown]
+      system %Q| /usr/sbin/shutdown -r 0 | if @options[:reboot  ]
     end # each mapped volume
   end # volumes_umount ---------------------------------------------------------
   
@@ -245,10 +245,10 @@ class VCMounter
       puts '-' * 79
       # parallel filesytem check
       dev_list = mapped_volumes.map{|name, props| props['virtual_device'].shellescape }
-      unless system("/sbin/fsck -M -a -C0 #{dev_list.join ' '}")
+      unless system("/usr/sbin/fsck -M -a -C0 #{dev_list.join ' '}")
         fsck_errors = true
         puts "Errors checking decrypted volumes!"
-        `/bin/systemd-ask-password "Press ENTER to continue..."`
+        `/usr/bin/systemd-ask-password "Press ENTER to continue..."`
       end
       puts '-' * 79
     end
@@ -260,7 +260,7 @@ class VCMounter
       mapped_volumes.each do |name, props|
         print " => #{name}: "
         
-        is_mounted = system %Q| /bin/mount \
+        is_mounted = system %Q| /usr/bin/mount \
           -o #{@config['mount_opts'].join(',').shellescape} \
           #{props['virtual_device'].shellescape} \
           #{props['mp'].shellescape} |
@@ -311,7 +311,7 @@ class VCMounter
       params_to_read.each do |name|
         value   = nil
         value   = @config[name].to_s if @config[name].to_s.present?
-        value ||= `/bin/systemd-ask-password #{prompts[name].shellescape}`.strip
+        value ||= `/usr/bin/systemd-ask-password #{prompts[name].shellescape}`.strip
         value   = 'retry' if value.blank?
         break if values_abort.include?(value) || values_retry.include?(value)
         @params[name] = value
@@ -386,7 +386,7 @@ class VCMounter
   def spindown_disk(device)
     return unless File.blockdev?(device)
     sleep 2
-    %x| /sbin/hdparm -y #{device} 2>&1 |
+    %x| /usr/sbin/hdparm -y #{device} 2>&1 |
   end # spindown_disk ----------------------------------------------------------
   
   # set cpu governor to "performance"
