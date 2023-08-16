@@ -2,17 +2,17 @@
 ; on them, and executes an optional per volume custom script.
 
 [Unit]
-Description = VeraCrypt volumes mounter
+Description = VeraCrypt volumes mounter (headless)
 ConditionFileIsExecutable = /opt/systemd-units/vc-mounter.rb
 DefaultDependencies = no
 Requires  = sysinit.target local-fs.target
-After     = sysinit.target local-fs.target
-Before    = basic.target shutdown.target
+After     = multi-user.target
+Before    = shutdown.target
 Conflicts = shutdown.target
 
 [Service]
 Type      = oneshot
-ExecStart = /opt/systemd-units/vc-mounter.rb fsck+mount
+ExecStart = /bin/true
 ExecStop  = /opt/systemd-units/vc-mounter.rb try-umount
 #ExecStop  = /opt/systemd-units/vc-mounter-test.sh
 RemainAfterExit   = yes
@@ -20,4 +20,4 @@ SuccessExitStatus = 1
 StandardOutput    = journal+console
 
 [Install]
-WantedBy  = basic.target
+WantedBy  = multi-user.target
