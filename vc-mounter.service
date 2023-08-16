@@ -8,7 +8,7 @@ DefaultDependencies = no
 RequiresMountsFor   = /
 Requires  = sysinit.target local-fs.target
 After     = sysinit.target local-fs.target
-Before    = shutdown.target kexec.target basic.target dbus.service
+Before    = shutdown.target kexec.target basic.target
 Conflicts = shutdown.target kexec.target
 
 [Install]
