@@ -37,23 +37,29 @@ if grep -qs /dev/shm /proc/mounts && [ -d $RAM_ROOT ]; then
   #   none  /mnt/ramd  tmpfs  defaults,user,size=512M,exec 0 0
 
   # /var/log
-  mkdir -p $RAM_DIR/var
-  tar   -C $RAM_DIR/var -xzf "$DATA_DIR/var.tgz" || exit 11
-  mount --bind $RAM_DIR/var/log /var/log         || exit 12
+  if [ -f "$DATA_DIR/var.tgz" ]; then
+    mkdir -p $RAM_DIR/var
+    tar   -C $RAM_DIR/var -xzf "$DATA_DIR/var.tgz" || exit 11
+    mount --bind $RAM_DIR/var/log /var/log         || exit 12
+  fi
 
   # /home -> $RAM_DIR/home
-  mkdir -m 775 -p     $RAM_DIR/home
-  chown -R root.users $RAM_DIR/home
-  # drop old dir and make a link to the new one
-  [ -d $RAM_DIR ] && rm -rf /home
-  ln -sf $RAM_DIR/home/ /home
-  # extract the archive of /home
-  tar -C $RAM_DIR/home -xzf "$DATA_DIR/homes.tgz" || exit 21
+  if [ -f "$DATA_DIR/homes.tgz" ]; then
+    mkdir -m 775 -p     $RAM_DIR/home
+    chown -R root.users $RAM_DIR/home
+    # drop old dir and make a link to the new one
+    [ -d $RAM_DIR ] && rm -rf /home
+    ln -sf $RAM_DIR/home/ /home
+    # extract the archive of /home
+    tar -C $RAM_DIR/home -xzf "$DATA_DIR/homes.tgz" || exit 21
+  fi
 
   # /root => $RAM_DIR/root_home
-  mkdir -m 755 -p $RAM_DIR/root_home       || exit 31
-  mount --bind    $RAM_DIR/root_home /root || exit 32
-  tar -C $RAM_DIR/root_home -xzf "$DATA_DIR/root_home.tgz" || exit 33
+  if [ -f "$DATA_DIR/root_home.tgz" ]; then
+    mkdir -m 755 -p $RAM_DIR/root_home       || exit 31
+    mount --bind    $RAM_DIR/root_home /root || exit 32
+    tar -C $RAM_DIR/root_home -xzf "$DATA_DIR/root_home.tgz" || exit 33
+  fi
 
   if [ -f "$DATA_DIR/munin.tgz" ]; then
     tar -C $RAM_DIR -xzf "$DATA_DIR/munin.tgz" || exit 33
