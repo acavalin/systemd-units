@@ -15,7 +15,7 @@ echo '---------- losetup' >> $log
 losetup -l >> $log
 
 echo '---------- try-umount' >> $log
-/opt/systemd-units/vc-mounter.rb try-umount >> $log 2>&1
+/opt/systemd-units/vc-mounter.rb umount -f >> $log 2>&1
 
 echo '----------------------------------------------' >> $log
 

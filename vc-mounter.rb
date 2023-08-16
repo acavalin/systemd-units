@@ -1,14 +1,15 @@
-#!/usr/bin/ruby
+#!/usr/bin/env ruby
+$VERBOSE    = nil
+STDOUT.sync = true
 
-require 'yaml'       # config parsing
-require 'open3'      # run command with STDIN/OUT access
-require 'ostruct'    # hash to object utility
-require 'shellwords' # escape strings for the shell
-require 'fileutils'  # symlinks & mkdir_p utils
-require 'pathname'   # mountpoint?
+running_as_script = File.basename($0) == File.basename(__FILE__)
+
+%w( yaml fileutils shellwords pathname optparse logger pp ).each{|lib| require lib }
+
+# re-run as root to overcome file permission errors
+exec %Q|sudo -E #{File.expand_path __FILE__} #{ARGV.map(&:shellescape).join ' '}| if running_as_script && Process.uid != 0
 
 Signal.trap('INT'){} # trap ^C
-STDOUT.sync = true   # autoflush
 
 class VCMounter
   HASH_ALGOS = %w{ sha256 sha512 whirlpool ripemd160 streebog }
@@ -19,331 +20,476 @@ class VCMounter
     AES-Twofish-Serpent Serpent-Twofish-AES  Kuznyechik-Serpent-Camellia
   }
 
-  DEV_CACHE = %w{ /run/shm /dev/shm /tmp }.detect{|d| File.exists?(d) } + '/vc-mounter'
+  DEV_CACHE = %w{ /run/shm /dev/shm /tmp }.detect{|d| File.exists? d } + '/vc-mounter'
 
-  ON_RASPI = File.read('/sys/firmware/devicetree/base/model') =~ /Raspberry Pi/i rescue false
-
-  def initialize(cfg_file = 'vc-mounter.yml')
-    @cfg  = OpenStruct.new YAML.load_file(cfg_file)
-    @cfg.mount_opts ||= 'users,rw,suid,exec,async,nodiscard'
+  ON_RASPI  = File.read('/sys/firmware/devicetree/base/model') =~ /Raspberry Pi/i rescue false
+  
+  LOG_LEVEL = Logger::WARN # levels: UNKNOWN, FATAL, ERROR, WARN, INFO, DEBUG
+  
+  def initialize
+    at_exit{ self.app_params_clear }
     
-    # make a backup of the devices links
-    FileUtils.mkdir_p DEV_CACHE
-    Dir.chdir('/dev/disk/by-id/') do
-      @cfg.mounts.
-        select{|id, mp| File.exists?(id) && File.exists?(mp) }.
-        each do |id, mp|
-          d = File.expand_path File.readlink("/dev/disk/by-id/#{id}")
-          FileUtils.symlink d, "#{DEV_CACHE}/#{id}", force: true
-        end
-    end
+    @log = Logger.new STDOUT, level: LOG_LEVEL, formatter: proc{|sev,ts,pn,msg| "#{sev[0..4].ljust 5}: #{msg}\n" }
 
-    @pass = ' ' * 100
-    @pim  = ' ' * 100 # personal iteration multiplier
-    @algo = ' ' * 100 # encryption algorithm
-    @hash = ' ' * 100 # hash algorithm
+    cfg_name  = 'vc-mounter.yml'
+    cfg_file  = [
+      ENV['VCMNT_CFG'],
+      cfg_name,
+      ".#{cfg_name}",
+      "#{ENV['HOME']}/.#{cfg_name}",
+      File.join(File.dirname(__FILE__), cfg_name),
+      File.join(File.dirname(__FILE__), ".#{cfg_name}"),
+      "/tmp/#{cfg_name}"
+    ].compact.detect{|f| File.exist?(f) if f }
+    die "config file not found! [#{cfg_name}]" unless cfg_file
+
+    cfg_file = File.expand_path cfg_file
+    @config  = YAML::load_file cfg_file
+    @config['cfg_file'  ] = cfg_file
+    
+    die "app not found! [#{@config['app']}]" unless File.executable?(@config['app'])
+    
+    # sanitize mount options
+    @config['mount_opts'] = (@config['mount_opts'] || 'users,suid,exec,async,nodiscard').to_s.split(',') - %w{ rw }
+    
+    # password, personal iteration multiplier, hash algorithm, encryption algorithm
+    @params = %w{ pass pim hash enca }.inject({}){|h, k| h.merge k => ' '*100 }
+    
+    # make a backup of devices links
+    FileUtils.mkdir_p DEV_CACHE
+    @config['volumes'].to_h.each do |name, props|
+      next unless File.exists?(props['mp'])
+      
+      if File.exist?("/dev/disk/by-id/#{props['dev']}")
+        device = File.readlink "/dev/disk/by-id/#{props['dev']}"
+        device = "/dev/disk/by-id/#{device}" if Pathname.new(device).relative?
+        @config['volumes'][name]['dev_src'  ] = File.expand_path device
+        @config['volumes'][name]['dev_cache'] = "#{DEV_CACHE}/#{props['dev']}"
+        FileUtils.symlink @config['volumes'][name]['dev_src'], @config['volumes'][name]['dev_cache'], force: true
+      elsif File.exists?(props['dev'])
+        @config['volumes'][name]['dev_src'  ] = File.expand_path props['dev']
+        @config['volumes'][name]['dev_cache'] = "#{DEV_CACHE}/#{File.basename props['dev']}"
+        FileUtils.symlink @config['volumes'][name]['dev_src'], @config['volumes'][name]['dev_cache'], force: true
+      else
+        @config['volumes'][name].merge! 'dev_src' => '[missing]', 'dev_cache' => '[missing]'
+      end
+    end
+    
+    Dir.chdir '/' # change to a safe directory
   end # initialize -------------------------------------------------------------
 
-  def set_cpu_governor(g)
-    # intel_pstates is all you need, don't bother changing the governor:
-    #   https://bbs.archlinux.org/viewtopic.php?pid=1303796#p1303796
-    #   https://plus.google.com/+TheodoreTso/posts/2vEekAsG2QT
-    return if `cpufreq-info -c 0 -d`.strip == 'intel_pstate'
-
-    `echo #{g} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
-  end
-  def set_cpu_max
-    @prev_governor = `/usr/bin/cpufreq-info -c 0`.split("\n").grep(/The governor/).first.to_s.sub(/.+"(.+)".+/, '\1')
-    @prev_governor = :ondemand if @prev_governor.empty?
-    set_cpu_governor :performance
-  end # set_cpu_max ------------------------------------------------------------
-  def set_cpu_prev; set_cpu_governor @prev_governor; end
-  
-  def run(args)
-    exit code: 2, msg: 'you are not root!' if `whoami`.strip != 'root'
-
-    set_cpu_max
+  def run(argv)
+    @options = CmdlineParser.parse(argv) rescue die($!, level: :error)
     
-    case args[0].to_s
-      when 'fsck+mount' # system mount
-        exit 0 if mount_all(mount: false, keep_pass: true) == :quit
-
-        if (errors = fsck).empty?
-          mount_all map: false
-          exit 0
-        else
-          puts "Errors checking volumes filesystems:"
-          puts errors.map{|i| "  * #{i}" }
-          puts "Leaving volumes MAPPED for inspection"
-          `systemd-ask-password "Press ENTER to continue..."`
-          exit 2
-        end
-      
-      when 'try-umount' # system umount
-        print 'Unmounting all encrypted volumes... '
-
-        ris = (dismount_volumes(force: false) || dismount_volumes(force: true)) ?
-          {code: 0, msg: 'done.' } : {code: 2, msg: "ERROR!\n#{managed_volumes_list}"}
-
-        if ON_RASPI
-          # veracrypt and systemd doesn't play well together on raspi during shutdown
-          # (no volumes are listed) so we try to manually dismount all mounted mountpoints:
-          `sync`
-          puts ''
-          existing_volumes.each do |id, mp|
-            next unless Pathname.new(mp).mountpoint? # true if mounted
-            puts "ENFORCING UMOUNT OF: #{mp} @ #{id}"
-            `fuser -vmk #{mp.shellescape}` # kill everything running inside
-            `umount #{mp.shellescape}`
-          end
-          `losetup --detach-all` # reset all /dev/loop* devices
-          `sync`
-        end
-
-        exit ris
-      
-      when 'mount'      # manual mount
-        mount_all
-        exit 1
-      
-      when 'umount'     # manual umount
-        print 'Unmounting all encrypted volumes... '
-        exit dismount_volumes(force: args.include?('force')) ?
-          {code: 1, msg: 'done.' } : {code: 2, msg: "ERROR!\n#{managed_volumes_list}"}
-      
-      else
-        exit code: 1, msg: "USAGE: #{File.basename __FILE__} <mount|fsck+mount|umount|try-umount> [force]"
+    @log.level = Logger.const_get @options[:log_level]
+    
+    @log.info "config file > #{@config['cfg_file'   ]}"
+    debug '@config' => @config, '@options' => @options, '@params' => @params, 'argv' => argv
+    
+    case argv[0]
+    when 'list'  ; volumes_list
+    when 'mount' ; volumes_mount
+    when 'umount'; volumes_umount
+    else           CmdlineParser.parse %w{-h}
     end
   end # run --------------------------------------------------------------------
   
-  # returns :quit if user typed "quit"
-  def mount_all(opts = {})
-    opts = {map: true, mount: true, keep_pass: false}.merge(opts)
-
-    loop do
-      if @pass.strip.empty? # ask password/pim/algo
-        @pass = `systemd-ask-password "Enter encrypted volumes password:" `.strip
-
-        @pim  = `systemd-ask-password "Enter encrypted volumes PIM:"      `.strip unless @pass == 'quit'
-
-        msg = "HASH: " + HASH_ALGOS.each_with_index.map{|a, i| %Q|[#{i}] #{a}|}.join(', ') + " | Num:"
-        @hash = `systemd-ask-password "#{msg}"`.strip unless [@pass, @pim].include?('quit')
-
-        #msg = "ENC: " + ENC_ALGOS.each_with_index.map{|a, i| %Q|[#{i}] #{a}|}.join(', ') + " | Num:"
-        #@algo = `systemd-ask-password "#{msg}"`.strip unless [@pass, @pim, @hash].include?('quit')
-
-        if [@pass, @pim, @hash, @algo].include?('quit')
-          puts "NOT mounting as requested."
-          break
-        end
-      end
-      
-      print "Mounting encrypted volumes (#{opts[:mount] ? 'map+mount' : 'map only' }): "
-      mountable_volumes.each{|id, mp| mount_volume id, mp, opts }
-      puts " done!"
-      
-      mounts = managed_volumes_list
-      puts mounts
-      
-      #break if mountable_volumes.keys.all?{|id| mounts.match id.to_s }
-      if mountable_volumes.keys.all?{|id| mounts.match id.to_s }
-        clear_pass unless opts[:keep_pass]
-        break
-      end
-      
-      # not all volumes are mounted, ask a new pass and retry
-      clear_pass
+  def app_params_clear
+    (@params||{}).keys.each do |k|
+      @params[k].size.times{|i| @params[k][i] = rand(100).chr }
+      @params[k] = ' '*100
     end
-    
-    @pass == 'quit' ? :quit : :ok
-  end # mount_all --------------------------------------------------------------
-  
-  def mount_volume(id, mp, opts = {})
-    opts = {map: true, mount: true}.merge(opts)
-    
-    print '_'
-    
-    status = volume_status id, mp
-    
-    if opts[:map] && !status.mapped && !status.mounted
-      # DO NOT USE THE LINUX NATIVE KERNEL CRYPTOGRAPHIC SERVICES TO DISABLE "TRIM"
-      # OPERATION ON SSD DRIVES, SEE:
-      #  - https://www.veracrypt.fr/en/Trim%20Operation.html
-      #  - http://asalor.blogspot.it/2011/08/trim-dm-crypt-problems.html
-      #    - If there is a strong requirement that information about unused sectors must not be available to attacker, TRIM must be always disabled.
-      #    - TRIM must not be used if there is a hidden device on the disk. (In this case TRIM would either erase the hidden data or reveal its position.)
-      #    - If TRIM is enabled and executed later (even only once by setting option and calling fstrim), this operation is irreversible.
-      #      Discarded sectors are still detectable even if TRIM is disabled again.
-      #    - In specific cases (depends on data patterns) some information could leak from the ciphertext device.
-      #      (In example above you can recognize filesystem type for example.)
-      #    - Encrypted disk cannot support functions which rely on returning zeroes of discarded sectors (even if underlying device announces such capability).
-      #    - Recovery of erased data on SSDs (especially using TRIM) requires completely new ways and tools.
-      #      Using standard recovery tools is usually not successful.
-      device_blk = File.basename File.readlink("#{DEV_CACHE}/#{id}")
-      device_blk = device_blk.sub(/(mmc.+)p[0-9]+/i, '\1') if device_blk =~ /^mmc/
-      device_blk = device_blk.sub(/([a-z]+).*/i, '\1') if device_blk =~ /^[sh]d/
-      is_ssd = File.read("/sys/block/#{device_blk}/queue/rotational").to_i == 0
-      
-      Open3.popen3([
-        "#{@cfg.app} -v -k '' --protect-hidden=no --filesystem=none",
-        (' -m nokernelcrypto'                     if is_ssd || ON_RASPI       ),
-        (" --hash=#{HASH_ALGOS[@hash.to_i]}"      if @hash.to_s.strip.size > 0),
-        (" --encryption=#{ENC_ALGOS[@algo.to_i]}" if @algo.to_s.strip.size > 0),
-        "  #{DEV_CACHE}/#{id} #{mp.shellescape}",
-      ].compact.join(' ')) do |si, so, se|
-        si.puts @pass.to_s
-        si.puts @pim .to_s
-      end
-      
-      status = volume_status id, mp
-      print "\b#{status.mapped ? 'm' : '-'}"
-    end
-  
-    if opts[:mount] && status.mapped && !status.mounted
-      system "mount -o #{@cfg.mount_opts} #{status.map_dev} #{mp}"
-      status = volume_status id, mp
-      print "\b#{status.mounted ? 'M' : '-'}"
-    end
-    
-    # managed by /etc/hdparm.conf
-    ## disable sleep timeout for usb drives
-    #if id.match(/^usb/)
-    #  ris = system("hdparm -q -S 0 #{id.sub /-part.$/, ''} 2> /dev/null")
-    #  print ris ? 'S' : 's'
-    #end
-    
-    print "_\b"
-    sleep 3
-    
-    if File.exists?("#{mp}/setup_tchd")
-      `/usr/bin/ruby #{mp}/setup_tchd`
-      print $?.to_i == 0 ? 'X' : 'x'
-    end
-  
-    print ' '
-  end # mount_volume -----------------------------------------------------------
-  
-  def fsck
-    errors   = []
-    to_check = []
-  
-    puts "Checking all encrypted volumes..."
-    puts '-' * 79
-    
-    existing_volumes.each do |id, mp|
-      status = volume_status id, mp
-      name   = "#{mp} / #{id} @ #{status.map_dev}"
-      
-      if status.mapped && !status.mounted
-        puts "  * #{name}: to be checked"
-        to_check << status.map_dev
-      else
-        puts "  * #{name}: unmapped/missing! SKIPPING CHECK!"
-        errors << "#{name}: skipped"
-      end
-    end
-    
-    # parallel filesytem check
-    unless system "fsck -M -a -C0 #{to_check.join ' '}"
-      errors << "fsck encountered some problems"
-    end
-    
-    puts '-' * 79
-    
-    errors
-  end # fsck -------------------------------------------------------------------
-  
-  def dismount_volumes(opts = {})
-    opts = {force: false}.merge(opts)
-
-    sleep 0.5
-
-    # swapoff any swap file within mounted volumes
-    sw_files = `swapon | grep " file " | cut -f 1 -d " "`.strip.split("\n")
-    mounted_volumes.each do |id, mp|
-      sw_files.each{|f| system "swapoff #{f.shellescape}" if f.include?(mp) }
-    end
-    
-    if opts[:force]
-      puts "Killing open processes..."
-      `exportfs -ua` # stop NFS server
-      mounted_volumes.each{|id, mp| system %Q|fuser -vmk #{mp.shellescape}| }
-      `#{@cfg.app} -d`
-      `#{@cfg.app} --force -d` # if $?.to_i != 0
-      `exportfs -ra` # restart NFS server
-    else
-      `#{@cfg.app} -d`
-    end
-    
-    sleep 0.5
-    
-    mounted_volumes.empty?
-  end # dismount_volumes -------------------------------------------------------
-  
-  def clear_pass
-    return if @pass.strip.empty? && @pim.strip.empty?
-    
-    puts "Clearing in-memory pass/pim..."
-    # clean password
-    @pass.size.times{|i| @pass[i] = rand(100).chr }
-    @pim .size.times{|i| @pim[i]  = rand(100).chr }
-    @hash.size.times{|i| @hash[i] = rand(100).chr }
-    @algo.size.times{|i| @pim[i]  = rand(100).chr }
-    @pass = ' ' * 100
-    @pim  = ' ' * 100 # personal iteration number
-    @hash = ' ' * 100
-    @algo = ' ' * 100
-    GC.enable
-    GC.start
-  end # clear_pass -------------------------------------------------------------
-  
-  def volume_exists?(id, mp)
-    File.exists?("#{DEV_CACHE}/#{id}") && File.exists?(mp)
-  end # volume_exists? ---------------------------------------------------------
-  
-  def volume_status(id, mp)
-    sleep 0.5
-    info     = `#{@cfg.app} --volume-properties #{DEV_CACHE}/#{id} 2> /dev/null`.split("\n")
-    virt_dev = info.grep(/Device/)[0].to_s.split(':')[1].to_s.strip
-    mnt_dir  = info.grep(/Mount/ )[0].to_s.split(':')[1].to_s.strip
-    OpenStruct.new mapped:  File.exists?(virt_dev),
-                   mounted: File.exists?(mnt_dir),
-                   map_dev: virt_dev,
-                   mnt_dir: mnt_dir
-  end # volume_status ----------------------------------------------------------
-  
-  def existing_volumes
-    @cfg.mounts.select{|id, mp| volume_exists? id, mp }
-  end # existing_volumes -------------------------------------------------------
-  
-  def mountable_volumes
-    existing_volumes.reject{|id, mp| volume_status(id, mp).mounted }
-  end # mountable_volumes ------------------------------------------------------
-  
-  def mounted_volumes
-    existing_volumes.select{|id, mp| volume_status(id, mp).mounted }
-  end # mounted_volumes --------------------------------------------------------
-  
-  def managed_volumes_list
-    `#{@cfg.app} -l 2>&1`.gsub("#{DEV_CACHE}/",'').gsub(/^/,'  * ')
-  end # managed_volumes_list ---------------------------------------------------
+    ObjectSpace.garbage_collect
+    nil
+  end # app_params_clear -------------------------------------------------------
   
   
   private # ____________________________________________________________________
   
   
-  def exit(opts = {})
-    opts = {code: opts} if opts.is_a?(Numeric)
-    set_cpu_prev
-    clear_pass
-    puts opts[:msg] if opts[:msg]
-    Kernel.exit opts[:code].to_i
-  end # exit -------------------------------------------------------------------
-end
+  def volumes_umount
+    mapped_volumes = volumes_status.            # eventually select the specified volume
+      select{|name, props| props['mapped'] && (@options[:volume].blank? || name == @options[:volume]) }
+    debug mapped_volumes
+    
+    die "no mapped volume found", code: 0 if mapped_volumes.empty?
+    
+    puts "Dismounting decrypted volumes: syncing..."
+    %x| sync | # flush disk writes
+    mapped_volumes.each do |name, props|
+      print " => #{name}: "
+      
+      # 1. run umount script
+      script_name = "#{props['mp']}/enc-hd-umount"
+      if props['mounted'] && @options[:scripts] && File.executable?(script_name)
+        sleep 1
+        ENV['VCMNT_VOLUME'] = props.inspect
+        print system(%Q| #{script_name.shellescape} 2>&1 |) ? 'SCRIPT_OK, ' : 'SCRIPT_ERROR, '
+        ENV['VCMNT_VOLUME'] = nil
+      end # run script
+      
+      # 2. dismount virtual volume
+      dismount_output = %x| #{@config['app']} -d #{props['dev_cache'].shellescape} 2>&1 |.strip
+      puts $?.to_i == 0 ? 'OK' : dismount_output
+      
+      # 3. try brute force only when requested and failed umount
+      unless @options[:force] && $?.to_i != 0
+        spindown_disk props['dev_src']
+        next
+      end
 
-vcm = VCMounter.new "#{File.dirname(__FILE__)}/vc-mounter.yml"
-at_exit do
-  vcm.set_cpu_prev
-  vcm.clear_pass rescue nil # ensure clear pass at exit without modifying exit status
-end
-vcm.run ARGV
+      if @options[:daemon]
+        logfile = '/tmp/vc-mounter-daemon.log'
+        puts '    => brute forcing dismount in daemon mode:'
+        puts "    => see #{logfile}"
+        Process.daemon
+        STDOUT.reopen logfile, 'a'
+        STDERR.reopen logfile, 'a'
+        puts "\n----- #{Time.now.strftime '%F %H:%M'} | #{name} | #{props['dev']} -----"
+      else
+        puts '    => brute forcing dismount:'
+      end
+      
+      nfs_active  = (`/usr/sbin/exportfs -s 2> /dev/null`.strip.size > 0)
+      dbus_active = system %Q| systemctl status dbus.service > /dev/null 2>&1 |
+      
+      if props['mounted']
+        puts '- swapoff files within volume'
+        swap_files = `swapon --show=TYPE,NAME --noheadings --raw 2> /dev/null`.split("\n").grep(/^file/).map{|l| l.split(' ')[1] }
+        swap_files.each{|f| `swapoff #{f.shellescape}` if f.start_with?(props['mp']) }
+        
+        if nfs_active
+          puts '- stopping NFS shares...'
+          `/usr/sbin/exportfs -ua`
+        end
+        
+        if dbus_active
+          puts '- stopping DBUS service...'
+          system %Q| systemctl stop dbus.service 2>&1 |
+        end
+        
+        puts '- killing open processes ----- first  try -----'
+        system %Q| /bin/fuser -vkm #{props['virtual_device'].shellescape} 2>&1 | ; sleep 1
+        puts '- killing open processes ----- second try -----'
+        system %Q| /bin/fuser -vkm #{props['virtual_device'].shellescape} 2>&1 |
+        
+        puts '- remount read-only'
+        system %Q| /bin/sync ; mount -o remount,ro #{props['virtual_device'].shellescape} 2>&1 |
+      end # if mounted
+      
+      puts '- retry dismount'
+      system %Q| #{@config['app']}         -d #{props['dev_cache'].shellescape} > /dev/null 2>&1 |
+      system %Q| #{@config['app']} --force -d #{props['dev_cache'].shellescape}             2>&1 | if $?.to_i != 0
+      
+      if $?.to_i != 0 && props['map_type'] == 'loop' && File.exist?(props['virtual_device'])
+        puts '- detaching loop device'
+        system %Q| /sbin/losetup --detach #{props['virtual_device'].shellescape} 2>&1 |
+      end
+      
+      if nfs_active
+        puts '- restarting NFS shares...'
+        `/usr/sbin/exportfs -ra 2> /dev/null`
+      end
+      
+      if dbus_active
+        puts '- restarting DBUS service...'
+        system %Q| systemctl start dbus.service 2>&1 |
+      end
+      
+      spindown_disk props['dev_src']
+      
+      sleep 1
+      system %Q| /sbin/shutdown -h 0 | if @options[:shutdown]
+      system %Q| /sbin/shutdown -r 0 | if @options[:reboot  ]
+    end # each mapped volume
+  end # volumes_umount ---------------------------------------------------------
+  
+  def volumes_mount
+    set_cpu_governor_max
+    
+    # 1. decrypt volumes/map to virtual devices
+    mappable_volumes = volumes_status.            # eventually select the specified volume
+      select{|name, props| props['mountable'] && (@options[:volume].blank? || name == @options[:volume]) }
+    debug mappable_volumes
+    if mappable_volumes.any?
+      app_params_read # read params only the first time
+      print "Decrypting volumes:"
+    end
+    mappable_volumes.each do |name, props|
+      print " #{name}"
+      app_cmd = %Q| #{@config['app'].shellescape} \
+        -v -k '' --protect-hidden=no --filesystem=none \
+        #{ '-m nokernelcrypto'                               if props['is_ssd'] || ON_RASPI } \
+        #{ "--hash=#{HASH_ALGOS[@params['hash'].to_i]}"      if @params['hash'].present?    } \
+        #{ "--encryption=#{ENC_ALGOS[@params['enca'].to_i]}" if @params['enca'].present?    } \
+        #{props['dev_cache'].shellescape}  #{props['mp'].shellescape} |
+      IO.popen("#{app_cmd} 2> /dev/null", 'r+') do |io|
+        io.puts @params['pass']
+        io.puts @params['pim' ]
+        io.close_write
+        io.read # read and discard output
+      end # IO.popen
+    end
+    puts ' done!' if mappable_volumes.any?
+    
+    mapped_volumes = volumes_status.select{|name, props| props['mapped'] && !props['mounted'] }
+    debug mapped_volumes
+    
+    # 2. fsck virtual devices
+    fsck_errors = false
+    if mapped_volumes.any? && @options[:fscheck]
+      puts "Checking decrypted volumes: #{mapped_volumes.keys.join ' '}"
+      puts '-' * 79
+      # parallel filesytem check
+      dev_list = mapped_volumes.map{|name, props| props['virtual_device'].shellescape }
+      unless system("/sbin/fsck -M -a -C0 #{dev_list.join ' '}")
+        fsck_errors = true
+        puts "Errors checking decrypted volumes!"
+        `/bin/systemd-ask-password "Press ENTER to continue..."`
+      end
+      puts '-' * 79
+    end
+
+    # 3. mount virtual devices
+    if mapped_volumes.any? && !fsck_errors
+      puts "Mounting decrypted volumes:"
+      @config['mount_opts'] << 'ro' if @options[:read_only]
+      mapped_volumes.each do |name, props|
+        print " => #{name}: "
+        
+        is_mounted = system %Q| /bin/mount \
+          -o #{@config['mount_opts'].join(',').shellescape} \
+          #{props['virtual_device'].shellescape} \
+          #{props['mp'].shellescape} |
+        print is_mounted ? "OK" : "ERROR"
+        
+        # 4. run mount script
+        script_name = "#{props['mp']}/enc-hd-mount"
+        if is_mounted && @options[:scripts] && File.executable?(script_name)
+          print ', '
+          sleep 1
+          ENV['VCMNT_VOLUME'] = props.inspect
+          print system(%Q| #{script_name.shellescape} 2>&1 |) ? 'SCRIPT_OK' : 'SCRIPT_ERROR'
+          ENV['VCMNT_VOLUME'] = nil
+        end # run script
+        
+        puts '.'
+      end # each mapped volume
+    end # mount volumes
+
+    set_cpu_governor_prev
+    
+    app_params_clear
+  end # volumes_mount ----------------------------------------------------------
+  
+  def volumes_list
+    maxl_name = @config['volumes'].keys.map(&:size).max
+    maxl_dev  = @config['volumes'].map{|n,p| p['dev'].size }.max
+    maxl_mp   = @config['volumes'].map{|n,p| p['mp' ].size }.max
+    puts " #{'NAME'.ljust maxl_name} | #{'DEVICE'.ljust maxl_dev} | #{'MOUNT POINT'.ljust maxl_mp}"
+    puts "-#{'-'*maxl_name}-+-#{'-'*maxl_dev}-+-#{'-'*maxl_mp}-"
+    @config['volumes'].each{|name, props| puts " #{name.ljust maxl_name} | #{props['dev'].ljust maxl_dev} | #{props['mp']}" }
+  end # volumes_list -----------------------------------------------------------
+  
+  def app_params_read
+    prompts = {
+      'pass' => "Enter encrypted volumes password:",
+      'pim'  => "Enter encrypted volumes PIM:",
+      'hash' => "HASH: " + HASH_ALGOS.each_with_index.map{|a, i| %Q|[#{i}] #{a}| }.join(', ') + " | Num:",
+      'enca' => "ENC: "  + ENC_ALGOS .each_with_index.map{|a, i| %Q|[#{i}] #{a}| }.join(', ') + " | Num:",
+    }
+    values_abort = %w{ quit  exit  skip  stop    }
+    values_retry = %w{ retry again reset restart }
+    params_to_read = @params.keys - %w{ enca } # TODO: currently used for volume creation only
+    
+    loop do
+      value = nil
+      
+      params_to_read.each do |name|
+        value   = nil
+        value   = @config[name].to_s if @config[name].to_s.present?
+        value ||= `/bin/systemd-ask-password #{prompts[name].shellescape}`.strip
+        value   = 'retry' if value.blank?
+        break if values_abort.include?(value) || values_retry.include?(value)
+        @params[name] = value
+      end
+      
+      die "NOT mounting as requested", code: 0 if values_abort.include?(value)
+      
+      break if params_to_read.all?{|name| @params[name].present? }
+    end
+    
+    nil
+  end # app_params_read --------------------------------------------------------
+  
+  def volumes_status
+    # build an info hash from veracrypt properties: {device_basename => info_hash}
+    app_info = {}
+    `#{@config['app'].shellescape} --volume-properties 2> /dev/null`.strip.split(/^$/).each do |text_block|
+      info = text_block.strip.split("\n").inject({}){|h, text_line|
+        k, v = text_line.split(': ', 2)
+        h.merge k.downcase.tr(' -', '__').delete('()') => v
+      }
+      app_info[ File.basename(info['volume']) ] = info
+    end
+    
+    # merge app info to our volumes configuration
+    volumes = @config['volumes'].deep_clone
+    volumes.each do |name, props|
+      dev_bname = File.basename volumes[name]['dev']
+      volumes[name].merge! app_info[dev_bname] if app_info.has_key?(dev_bname)
+      volumes[name]['mounted'   ] = Pathname.new(volumes[name]['mp']).mountpoint?
+      volumes[name]['mapped'    ] = File.exist? volumes[name]['virtual_device'].to_s
+      volumes[name]['map_type'  ] = 'loop'   if volumes[name]['virtual_device'].to_s.start_with?('/dev/loop'  )
+      volumes[name]['map_type'  ] = 'mapper' if volumes[name]['virtual_device'].to_s.start_with?('/dev/mapper')
+      volumes[name]['mountable' ] = true if !volumes[name]['mounted'] && !volumes[name]['mapped'] &&
+                                            File.exist?(volumes[name]['dev_cache']) && File.directory?(volumes[name]['mp'])
+      volumes[name]['umountable'] = true if volumes[name]['mapped']
+      
+      # test if disk is SSD or HDD/file
+      if volumes[name]['dev_src'].start_with?('/dev/')
+        # DO NOT USE THE LINUX NATIVE KERNEL CRYPTOGRAPHIC SERVICES TO DISABLE "TRIM"
+        # OPERATION ON SSD DRIVES, SEE:
+        # - https://www.veracrypt.fr/en/Trim%20Operation.html
+        # - http://asalor.blogspot.it/2011/08/trim-dm-crypt-problems.html
+        #   - If there is a strong requirement that information about unused
+        #     sectors must not be available to attacker, TRIM must be always
+        #     disabled.
+        #   - TRIM must not be used if there is a hidden device on the disk.
+        #     (In this case TRIM would either erase the hidden data or reveal
+        #     its position.)
+        #   - If TRIM is enabled and executed later (even only once by setting
+        #     option and calling fstrim), this operation is irreversible.
+        #     Discarded sectors are still detectable even if TRIM is disabled again.
+        #   - In specific cases (depends on data patterns) some information
+        #     could leak from the ciphertext device.
+        #     (In example above you can recognize filesystem type for example.)
+        #   - Encrypted disk cannot support functions which rely on returning
+        #     zeroes of discarded sectors (even if underlying device announces
+        #     such capability).
+        #   - Recovery of erased data on SSDs (especially using TRIM) requires
+        #     completely new ways and tools.
+        #     Using standard recovery tools is usually not successful.
+        device_blk = File.basename volumes[name]['dev_src']
+        device_blk = device_blk.sub(/(mmc.+)p[0-9]+/i, '\1') if device_blk =~ /^mmc/
+        device_blk = device_blk.sub(/([a-z]+).*/i    , '\1') if device_blk =~ /^[sh]d/
+        volumes[name]['is_ssd'] = File.read("/sys/block/#{device_blk}/queue/rotational").to_i == 0 rescue true # better safe than sorry
+      end # test ssd
+    end # each volume
+    
+    volumes
+  end # volumes_status ---------------------------------------------------------
+  
+  def spindown_disk(device)
+    %x| /sbin/hdparm -y #{device} 2>&1 | if File.blockdev?(device)
+  end # spindown_disk ----------------------------------------------------------
+  
+  # set cpu governor to "performance"
+  def set_cpu_governor_max
+    # save current governor
+    @config['cpu_governor'] ||= `/usr/bin/cpufreq-info -c 0`.split("\n").grep(/The governor/i).first.to_s.split('"')[1]
+    @config['cpu_governor'] = :ondemand if @config['cpu_governor'].blank?
+    set_cpu_governor :performance
+  end # set_cpu_governor_max ---------------------------------------------------
+  
+  # restore initial cpu governor
+  def set_cpu_governor_prev
+    set_cpu_governor @config['cpu_governor']
+  end # set_cpu_governor_prev --------------------------------------------------
+  
+  # set the specified cpu governor to every cpu/core
+  def set_cpu_governor(name)
+    # intel_pstates is all you need, don't bother changing the governor:
+    #   https://bbs.archlinux.org/viewtopic.php?pid=1303796#p1303796
+    #   https://plus.google.com/+TheodoreTso/posts/2vEekAsG2QT
+    return if `cpufreq-info -c 0 -d`.strip == 'intel_pstate'
+    
+    `echo #{name} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
+  end # set_cpu_governor -------------------------------------------------------
+  
+  # print a message and exit
+  def die(msg, options = {})
+    options[:code ] ||= 1
+    options[:level] ||= :fatal
+    @log.send options[:level], msg
+    exit options[:code]
+  end # die --------------------------------------------------------------------
+  
+  # print a debug message
+  def debug(obj); @log.debug PP.pp(obj, '', 75); end
+end# class VCMounter
+
+class CmdlineParser
+  LOG_LEVELS = { 'u' => :UNKNOWN, 'f' => :FATAL, 'e' => :ERROR, 'w' => :WARN, 'i' => :INFO, 'd' => :DEBUG }
+  
+  def self.parse(args, default_opts = {})
+    # default option values
+    options = {
+      force:       false,
+      daemon:      false,
+      fscheck:     false,
+      scripts:     true,
+      read_only:   false,
+      volume:      nil,
+      shutdown:    false,
+      reboot:      false,
+      log_level:   :WARN,
+    }.merge default_opts
+    
+    optparse = OptionParser.new do |opts|
+      progr = File.basename __FILE__
+
+      # Set a banner, displayed at the top of the help screen.
+      opts.banner = ''
+      
+      opts.on('-c', '--check'     , "fsck before mount         def. #{options[:fscheck    ]}"){ options[:fscheck  ] = true  }
+      opts.on('-n', '--no-scripts', "do not run scripts        def. #{options[:scripts    ]}"){ options[:scripts  ] = false }
+      opts.on('-r', '--read-only' , "mount read only           def. #{options[:read_only  ]}"){ options[:read_only] = true  }
+      opts.on('-f', '--force'     , "force umount              def. #{options[:force      ]}"){ options[:force    ] = true  }
+      opts.on('-F', '--force-bg'  , "force umount as daemon    def. #{options[:force      ]}"){ options[:force] = options[:daemon] = true }
+      opts.on('-S', '--shutdown'  , "*after forced umount      def. #{options[:shutdown   ]}"){ options[:shutdown ] = true  }
+      opts.on('-R', '--reboot'    , "*after forced umount      def. #{options[:reboot     ]}"){ options[:reboot   ] = true  }
+      opts.on('-v NAME', '--volume NAME', String,
+                                    "use this volume only      def. #{options[:volume     ]}"){|v| options[:volume ] = v }
+      opts.on('-l LVL', '--log-level LVL', String,
+                                    "[e]rr/[w]arn/[i]nf/[d]bg  def. #{options[:log_level  ]}"){|v| options[:log_level ] = LOG_LEVELS[v] if LOG_LEVELS[v] }
+      opts.on('-h', '--help'      , "show this help") do
+        puts "USAGE: #{progr} [switches] <list|mount|umount>#{opts}"
+        exit 1
+      end # -h
+    end # OptionParser.new
+    
+    begin
+      optparse.parse! args # extract switches and modify args
+    rescue SystemExit
+      exit 100
+    end
+
+    options
+  end # self.parse -------------------------------------------------------------
+end # class CmdlineParser
+
+# https://github.com/rails/rails/blob/master/activesupport/lib/active_support/core_ext/object/try.rb
+module ObjectUtils
+  def try(method_name = nil, *args, &b)
+    if method_name.nil? && block_given?
+      b.arity == 0 ? instance_eval(&b) : yield(self)
+    elsif respond_to?(method_name)
+      public_send method_name, *args, &b
+    end
+  end unless nil.respond_to?(:try)
+  
+  def deep_clone; Marshal.load Marshal.dump(self); end
+end # module ObjectUtils
+
+module StringUtils
+  def blank?  ; self.to_s.strip.size == 0; end
+  def present?; !self.to_s.blank?        ; end
+  def no_ts   ; self.to_s.sub(/^\/*/, '').sub(/\/*$/, ''); end # remove trailing slashes
+end # module StringUtils
+
+Object  .send :include, ObjectUtils
+String  .send :include, StringUtils
+NilClass.send :include, StringUtils
+
+VCMounter.new.run ARGV.dup if running_as_script

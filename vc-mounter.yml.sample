@@ -1,7 +1,5 @@
 ---
-:app:  /opt/veracrypt/veracrypt.gui -t
-:user: username
-:mounts:
-  example1.vc: /mnt/example1
-  example2.vc: /mnt/example2
-  example3.vc: /mnt/example3
+app:  /opt/veracrypt/veracrypt.gui -t
+volumes:
+  example1: { dev: '/path/to/file.bin', mp: '/mnt/example1' }
+  example2: { dev: 'dev-disk-by-id_id', mp: '/mnt/example2' }

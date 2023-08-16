@@ -7,13 +7,13 @@ ConditionFileIsExecutable = /opt/systemd-units/vc-mounter.rb
 DefaultDependencies = no
 Requires  = sysinit.target local-fs.target
 After     = multi-user.target
-Before    = shutdown.target
+Before    = shutdown.target dbus.service
 Conflicts = shutdown.target
 
 [Service]
 Type      = oneshot
 ExecStart = /bin/true
-ExecStop  = /opt/systemd-units/vc-mounter.rb try-umount
+ExecStop  = /opt/systemd-units/vc-mounter.rb umount -f
 #ExecStop  = /opt/systemd-units/vc-mounter-test.sh
 RemainAfterExit   = yes
 SuccessExitStatus = 1
