@@ -12,7 +12,8 @@ exec %Q|sudo -E #{File.expand_path __FILE__} #{ARGV.map(&:shellescape).join ' '}
 Signal.trap('INT'){} # trap ^C
 
 class VCMounter
-  HASH_ALGOS = %w{ sha256 sha512 whirlpool ripemd160 streebog }
+  # https://www.veracrypt.fr/code/VeraCrypt/tree/src/Volume/Hash.cpp
+  HASH_ALGOS = %w{ sha256 sha512 whirlpool blake2s streebog }
   
   ENC_ALGOS = %w{
     AES  Camellia  Kuznyechik  Serpent  Twofish
@@ -373,7 +374,9 @@ class VCMounter
         #   - Recovery of erased data on SSDs (especially using TRIM) requires
         #     completely new ways and tools.
         #     Using standard recovery tools is usually not successful.
-        device_blk = File.basename volumes[name]['dev_src']
+        device_blk = volumes[name]['dev_src']
+        device_blk = File.readlink(device_blk) if File.symlink?(device_blk)
+        device_blk = File.basename device_blk
         device_blk = device_blk.sub(/(mmc.+)p[0-9]+/i, '\1') if device_blk =~ /^mmc/
         device_blk = device_blk.sub(/([a-z]+).*/i    , '\1') if device_blk =~ /^[sh]d/
         volumes[name]['is_ssd'] = File.read("/sys/block/#{device_blk}/queue/rotational").to_i == 0 rescue true # better safe than sorry
