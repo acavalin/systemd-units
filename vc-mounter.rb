@@ -346,12 +346,12 @@ class VCMounter
       volumes[name]['mapped'    ] = File.exist? volumes[name]['virtual_device'].to_s
       volumes[name]['map_type'  ] = 'loop'   if volumes[name]['virtual_device'].to_s.start_with?('/dev/loop'  )
       volumes[name]['map_type'  ] = 'mapper' if volumes[name]['virtual_device'].to_s.start_with?('/dev/mapper')
-      volumes[name]['mountable' ] = true if !volumes[name]['mounted'] && !volumes[name]['mapped'] &&
+      volumes[name]['mountable' ] = true if !volumes[name]['mounted'] && !volumes[name]['mapped'] && volumes[name]['dev_cache'] &&
                                             File.exist?(volumes[name]['dev_cache']) && File.directory?(volumes[name]['mp'])
       volumes[name]['umountable'] = true if volumes[name]['mapped']
       
       # test if disk is SSD or HDD/file
-      if volumes[name]['dev_src'].start_with?('/dev/')
+      if volumes[name]['dev_src'].to_s.start_with?('/dev/')
         # DO NOT USE THE LINUX NATIVE KERNEL CRYPTOGRAPHIC SERVICES TO DISABLE "TRIM"
         # OPERATION ON SSD DRIVES, SEE:
         # - https://www.veracrypt.fr/en/Trim%20Operation.html
