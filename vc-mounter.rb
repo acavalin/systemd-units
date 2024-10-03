@@ -7,7 +7,7 @@ running_as_script = File.basename($0) == File.basename(__FILE__)
 %w( yaml fileutils shellwords pathname optparse logger pp ).each{|lib| require lib }
 
 # re-run as root to overcome file permission errors
-exec %Q|sudo -E #{File.expand_path __FILE__} #{ARGV.map(&:shellescape).join ' '}| if running_as_script && Process.uid != 0
+exec %Q|sudo #{File.expand_path __FILE__} #{ARGV.map(&:shellescape).join ' '}| if running_as_script && Process.uid != 0
 
 Signal.trap('INT'){} # trap ^C
 
