@@ -12,6 +12,8 @@ exec %Q|sudo #{File.expand_path __FILE__} #{ARGV.map(&:shellescape).join ' '}| i
 Signal.trap('INT'){} # trap ^C
 
 class VCMounter
+  VERSION = '20250902'
+
   # https://www.veracrypt.fr/code/VeraCrypt/tree/src/Volume/Hash.cpp
   HASH_ALGOS = %w{ sha256 sha512 whirlpool blake2s streebog }
   
@@ -297,10 +299,10 @@ class VCMounter
   
   def app_params_read
     prompts = {
-      'pass' => "Enter encrypted volumes password:",
-      'pim'  => "Enter encrypted volumes PIM:",
-      'hash' => "HASH: " + HASH_ALGOS.each_with_index.map{|a, i| %Q|[#{i}] #{a}| }.join(', ') + " | Num:",
-      'enca' => "ENC: "  + ENC_ALGOS .each_with_index.map{|a, i| %Q|[#{i}] #{a}| }.join(', ') + " | Num:",
+      'pass' => "Enter encrypted volumes password=",
+      'pim'  => "Enter encrypted volumes PIM=",
+      'hash' => "HASH: " + HASH_ALGOS.each_with_index.map{|a, i| %Q|[#{i}] #{a}| }.join(', ') + " | Num=",
+      'enca' => "ENC: "  + ENC_ALGOS .each_with_index.map{|a, i| %Q|[#{i}] #{a}| }.join(', ') + " | Num=",
     }
     values_abort = %w{ quit  exit  skip  stop    }
     values_retry = %w{ retry again reset restart }
@@ -395,13 +397,20 @@ class VCMounter
   # set cpu governor to "performance"
   def set_cpu_governor_max
     # save current governor
-    @config['cpu_governor'] ||= `/usr/bin/cpufreq-info -c 0`.split("\n").grep(/The governor/i).first.to_s.split('"')[1]
-    @config['cpu_governor'] = :ondemand if @config['cpu_governor'].blank?
+    if (cmd = `which cpupower`.strip).size > 0
+      @config['cpu_governor'] ||= `#{cmd} -c 0 frequency-info`.split("\n").grep(/The governor/i).first.to_s.split('"')[1]
+    elsif (cmd = `which cpufreq-info`.strip).size > 0
+      @config['cpu_governor'] ||= `#{cmd} -c 0`.split("\n").grep(/The governor/i).first.to_s.split('"')[1]
+    else
+      return
+    end
+
     set_cpu_governor :performance
   end # set_cpu_governor_max ---------------------------------------------------
   
   # restore initial cpu governor
   def set_cpu_governor_prev
+    return if @config['cpu_governor'].to_s.size == 0
     set_cpu_governor @config['cpu_governor']
   end # set_cpu_governor_prev --------------------------------------------------
   
@@ -410,7 +419,11 @@ class VCMounter
     # intel_pstates is all you need, don't bother changing the governor:
     #   https://bbs.archlinux.org/viewtopic.php?pid=1303796#p1303796
     #   https://plus.google.com/+TheodoreTso/posts/2vEekAsG2QT
-    return if `cpufreq-info -c 0 -d`.strip == 'intel_pstate'
+    if (cmd = `which cpupower`.strip).size > 0
+      return if `#{cmd} -c 0 frequency-info -d`.include?('intel_pstate')
+    elsif (cmd = `which cpufreq-info`).size > 0
+      return if `#{cmd} -c 0 -d`.include?('intel_pstate')
+    end
     
     `echo #{name} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
   end # set_cpu_governor -------------------------------------------------------

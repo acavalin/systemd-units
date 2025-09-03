@@ -50,9 +50,14 @@ if grep -qs /dev/shm /proc/mounts && [ -d $RAM_ROOT ]; then
 
   # /var/log
   if [ -f "$DATA_DIR/var.tgz" ]; then
+    mv -f /var/log/boot.log /tmp 2> /dev/null
+
+    # unzip skeleton
     mkdir -p $RAM_DIR/var
     tar   -C $RAM_DIR/var -xzf "$DATA_DIR/var.tgz" || exit 11
     mount --bind $RAM_DIR/var/log /var/log         || exit 12
+
+    mv -f /tmp/boot.log /var/log/ 2> /dev/null
   fi
 
   # /home -> $RAM_DIR/home
